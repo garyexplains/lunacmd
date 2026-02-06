@@ -1,0 +1,8 @@
+# Root build artifact
+lunacmd
+
+# Lua build artifacts
+lua/src/*.o
+lua/src/liblua.a
+lua/src/lua
+lua/src/luac
