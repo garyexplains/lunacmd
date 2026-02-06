@@ -54,5 +54,5 @@ source hello.lua
 
 ## Current Status
 
-- Single-command redirection is implemented.
-- Pipeline syntax is parsed but pipeline execution is not implemented yet.
+- Redirection is implemented (`:>`, `:>>`, `2:>`, `2:>>`, `2:>&1`, `:<`).
+- Pipelines are implemented with `:|` and work across builtins and `exec`.
