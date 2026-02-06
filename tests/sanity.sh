@@ -3,6 +3,7 @@ set -eu
 
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$REPO_ROOT"
+export LUNACMD_NO_RC=1
 
 pass() {
     printf "PASS: %s\n" "$1"
@@ -211,5 +212,82 @@ assert_contains "wc -m counts characters" "$out" "15 $tmpdir9/wc.txt"
 
 out="$(printf 'wc -L %s/wc.txt\nexit\n' "$tmpdir9" | ./lunacmd 2>&1)"
 assert_contains "wc -L reports longest line length" "$out" "7 $tmpdir9/wc.txt"
+
+tmpdir10="$(mktemp -d)"
+trap 'rm -rf "$tmpdir" "$tmpdir2" "$tmpdir3" "$tmpdir4" "$tmpdir5" "$tmpdir6" "$tmpdir7" "$tmpdir8" "$tmpdir9" "$tmpdir10"' EXIT INT TERM
+printf 'line_from_stdin\n' > "$tmpdir10/in.txt"
+
+out="$(printf 'echo redir_one :> %s/out.txt\ncat %s/out.txt\nexit\n' "$tmpdir10" "$tmpdir10" | ./lunacmd 2>&1)"
+assert_contains "stdout redirection writes file" "$out" "redir_one"
+
+out="$(printf 'echo first :> %s/append.txt\necho second :>> %s/append.txt\ncat %s/append.txt\nexit\n' "$tmpdir10" "$tmpdir10" "$tmpdir10" | ./lunacmd 2>&1)"
+assert_contains "stdout append redirection keeps first line" "$out" "first"
+assert_contains "stdout append redirection appends second line" "$out" "second"
+
+out="$(printf 'rm %s/no_such_file.txt 2:> %s/err.txt\ncat %s/err.txt\nexit\n' "$tmpdir10" "$tmpdir10" "$tmpdir10" | ./lunacmd 2>&1)"
+assert_contains "stderr redirection captures error output" "$out" "No such file or directory"
+
+out="$(printf 'rm %s/no_such_file2.txt :> %s/both.txt 2:>&1\ncat %s/both.txt\nexit\n' "$tmpdir10" "$tmpdir10" "$tmpdir10" | ./lunacmd 2>&1)"
+assert_contains "stderr to stdout redirection works" "$out" "No such file or directory"
+
+out="$(printf 'exec cat :< %s/in.txt\nexit\n' "$tmpdir10" | ./lunacmd 2>&1)"
+assert_contains "stdin redirection feeds command input" "$out" "line_from_stdin"
+
+out="$(printf 'echo hi :| exec cat\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "pipeline executes with lunacmd pipe syntax" "$out" "hi"
+
+out="$(printf 'echo catstdin :| cat\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "cat reads stdin when used in pipeline" "$out" "catstdin"
+
+out="$(printf 'echo one two three :| wc -w\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "wc reads stdin in pipeline" "$out" "3 -"
+
+out="$(printf 'echo abcdef :| fold -w 3\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "fold reads stdin in pipeline first chunk" "$out" "abc"
+assert_contains "fold reads stdin in pipeline second chunk" "$out" "def"
+
+out="$(printf ':! echo legacy > %s/legacy.txt\ncat %s/legacy.txt\nexit\n' "$tmpdir10" "$tmpdir10" | ./lunacmd 2>&1)"
+assert_contains "legacy symbols work only with :! prefix" "$out" "legacy"
+
+out="$(printf 'a=1; b=2; if a < b then print(\"lua_cmp_ok\") end\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "lua comparison operators stay valid in default mode" "$out" "lua_cmp_ok"
+
+out="$(printf 'ls > %s/legacy_oops.txt\nexit\n' "$tmpdir10" | ./lunacmd 2>&1)"
+assert_contains "legacy redirect without :! gives helpful parse error" "$out" "legacy operator '>' requires ':!' prefix"
+
+out="$(printf 'setprompt LUNA>\nprompt\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "setprompt updates PROMPT string" "$out" "PROMPT: LUNA>"
+
+out="$(printf 'PROMPT=function() return G_CWD end\ncd /tmp\nprint("PROMPT_VALUE=" .. PROMPT())\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "prompt function can use current G_CWD" "$out" "PROMPT_VALUE=/tmp"
+
+out="$(printf 'PROMPT=function() error("boom") end\necho ok\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "prompt function failure falls back with warning" "$out" "Prompt error (PROMPT):"
+assert_contains "prompt fallback still allows execution" "$out" "ok"
+
+out="$(printf 'PROMPT_CONT="++ "\nprompt\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "custom continuation prompt can be configured" "$out" "PROMPT_CONT: ++ "
+
+tmpdir11="$(mktemp -d)"
+trap 'rm -rf "$tmpdir" "$tmpdir2" "$tmpdir3" "$tmpdir4" "$tmpdir5" "$tmpdir6" "$tmpdir7" "$tmpdir8" "$tmpdir9" "$tmpdir10" "$tmpdir11"' EXIT INT TERM
+mkdir -p "$tmpdir11/.lunacmd/builtin"
+cat > "$tmpdir11/.lunacmd/builtin/ubcmd.lua" <<'EOF'
+print("from_user_builtin")
+EOF
+cat > "$tmpdir11/.lunacmd/builtin/echo.lua" <<'EOF'
+print("USER_ECHO_OVERRIDE")
+EOF
+
+out="$(printf 'ubcmd\nwhich ubcmd\ntype ubcmd\nexit\n' | HOME="$tmpdir11" ./lunacmd 2>&1)"
+assert_contains "user builtin executes from ~/.lunacmd/builtin" "$out" "from_user_builtin"
+assert_contains "which reports user builtin path" "$out" "$tmpdir11/.lunacmd/builtin/ubcmd.lua"
+assert_contains "type reports user builtin kind" "$out" "ubcmd is a user builtin"
+
+out="$(printf 'echo hello\nexit\n' | HOME="$tmpdir11" ./lunacmd 2>&1)"
+assert_contains "core builtin takes precedence over user duplicate" "$out" "hello"
+assert_not_contains "core precedence blocks user override by default" "$out" "USER_ECHO_OVERRIDE"
+
+out="$(printf 'ubcmd\nexit\n' | HOME="$tmpdir11" LUNACMD_NO_USER_BUILTINS=1 ./lunacmd 2>&1)"
+assert_contains "LUNACMD_NO_USER_BUILTINS disables user builtin lookup" "$out" "Lua error:"
 
 printf "All sanity checks passed.\n"

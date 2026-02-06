@@ -26,11 +26,26 @@ local function cat_file(path)
     return false
 end
 
+local function cat_stdin()
+    local content = io.read("*a")
+    if content then
+        io.write(content)
+        return true
+    end
+    io.stderr:write("cat: failed to read stdin\n")
+    return false
+end
+
 if not ARGC or ARGC == 0 then
-    io.stderr:write("cat: missing file operand\n")
+    cat_stdin()
     return
 end
 
 for i = 1, ARGC do
-    cat_file(ARGS[i] or "")
+    local arg = ARGS[i] or ""
+    if arg == "-" then
+        cat_stdin()
+    else
+        cat_file(arg)
+    end
 end

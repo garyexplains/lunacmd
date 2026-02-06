@@ -82,13 +82,12 @@ for i = 1, (ARGC or 0) do
             opts[flag] = true
         end
     else
-        files[#files + 1] = resolve_path(arg)
+        if arg == "-" then
+            files[#files + 1] = "-"
+        else
+            files[#files + 1] = resolve_path(arg)
+        end
     end
-end
-
-if #files == 0 then
-    io.stderr:write("wc: missing file operand\n")
-    return
 end
 
 local any_flag = opts.c or opts.m or opts.l or opts.w or opts.L
@@ -113,14 +112,34 @@ local function print_counts(counts, label)
     print(table.concat(out, " "))
 end
 
-for _, path in ipairs(files) do
-    local f = io.open(path, "rb")
-    if not f then
-        io.stderr:write("wc: cannot open '" .. path .. "'\n")
-    else
-        local content = f:read("*a") or ""
-        f:close()
+if #files == 0 then
+    local content = io.read("*a") or ""
+    local counts = {}
+    counts.c = #content
+    counts.m = count_utf8_chars(content)
+    counts.l = count_newlines(content)
+    counts.w = count_words(content)
+    counts.L = longest_line_chars(content)
+    print_counts(counts, "-")
+    return
+end
 
+for _, path in ipairs(files) do
+    local content = nil
+
+    if path == "-" then
+        content = io.read("*a") or ""
+    else
+        local f = io.open(path, "rb")
+        if not f then
+            io.stderr:write("wc: cannot open '" .. path .. "'\n")
+        else
+            content = f:read("*a") or ""
+            f:close()
+        end
+    end
+
+    if content ~= nil then
         local counts = {}
         counts.c = #content
         counts.m = count_utf8_chars(content)
