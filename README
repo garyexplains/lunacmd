@@ -1,29 +1,57 @@
-Installing LUA
+# lunacmd
 
-curl -L -R -O https://www.lua.org/ftp/lua-5.4.7.tar.gz
-tar zxf lua-5.4.7.tar.gz
-mv lua-5.4.7 lua
-cd lua
-make all test
+`lunacmd` is a Lua-first command-line environment.
 
-----------------------
-For curly braces like this:
+- Default mode is Lua syntax and Lua execution.
+- Shell-like command convenience is supported via builtins.
+- User-defined builtins are supported from `~/.lunacmd/builtin`.
+- Redirection and pipeline syntax is lunacmd-native (`:>`, `:<`, `:|`) to avoid Lua conflicts.
+- Legacy shell symbols are opt-in with `:!`.
 
-for (int i = 0; i < 10; i++) {
-    // ...
-}
+## Quick Start
 
-Go Preferences -> Settings
-Search for C_Cpp.clang_format_fallbackStyle
-Click Edit, Copy to Settings
-Change from "Visual Studio" to "{ BasedOnStyle: Google, IndentWidth: 4, ColumnLimit: 0}"
-btw ColumnLimit: 0 is helpful too, because google limit will break your code to next line when you do not need it.
-If you want more:
+1. Install dependencies:
 
-check https://clang.llvm.org/docs/ClangFormatStyleOptions.html
-
-------------------------
-
-READLINE library
-
+```sh
 sudo apt install libreadline-dev -y
+```
+
+2. Build:
+
+```sh
+make
+```
+
+3. Run:
+
+```sh
+./lunacmd
+```
+
+4. Run tests:
+
+```sh
+make test
+```
+
+## Example Session
+
+```text
+pwd
+cd /tmp
+echo hello :> out.txt
+cat out.txt
+source hello.lua
+```
+
+## Documentation
+
+- `docs/getting-started.md`
+- `docs/language.md`
+- `docs/builtins.md`
+- `docs/development.md`
+
+## Current Status
+
+- Single-command redirection is implemented.
+- Pipeline syntax is parsed but pipeline execution is not implemented yet.

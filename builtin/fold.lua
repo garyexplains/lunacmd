@@ -69,28 +69,40 @@ while i <= (ARGC or 0) do
         width = v
         i = i + 2
     else
-        files[#files + 1] = resolve_path(arg or "")
+        if arg == "-" then
+            files[#files + 1] = "-"
+        else
+            files[#files + 1] = resolve_path(arg or "")
+        end
         i = i + 1
     end
 end
 
+local function process_stream(f)
+    for line in f:lines() do
+        if break_spaces then
+            fold_spaces(line, width)
+        else
+            fold_hard(line, width)
+        end
+    end
+end
+
 if #files == 0 then
-    io.stderr:write("fold: missing file operand\n")
+    process_stream(io.stdin)
     return
 end
 
 for _, path in ipairs(files) do
-    local f = io.open(path, "rb")
-    if not f then
-        io.stderr:write("fold: cannot open '" .. path .. "'\n")
+    if path == "-" then
+        process_stream(io.stdin)
     else
-        for line in f:lines() do
-            if break_spaces then
-                fold_spaces(line, width)
-            else
-                fold_hard(line, width)
-            end
+        local f = io.open(path, "rb")
+        if not f then
+            io.stderr:write("fold: cannot open '" .. path .. "'\n")
+        else
+            process_stream(f)
+            f:close()
         end
-        f:close()
     end
 end
