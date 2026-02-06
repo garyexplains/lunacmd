@@ -1,3 +1,11 @@
+for i = 1, (ARGC or 0) do
+    local a = ARGS[i]
+    if a == "-h" or a == "--help" then
+        print("usage: prompt")
+        return
+    end
+end
+
 local function describe(name, value)
     local t = type(value)
     if t == "nil" then

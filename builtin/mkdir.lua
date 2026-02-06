@@ -67,6 +67,9 @@ for i = 1, ARGC do
     local arg = ARGS[i] or ""
     if parse_options and arg == "--" then
         parse_options = false
+    elseif parse_options and (arg == "-h" or arg == "--help") then
+        print("usage: mkdir [-p|--parents] DIR...")
+        return
     elseif parse_options and arg == "-p" then
         use_parents = true
     elseif parse_options and arg == "--parents" then

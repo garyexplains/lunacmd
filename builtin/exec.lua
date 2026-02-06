@@ -2,6 +2,14 @@ local function sh_quote(s)
     return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
 end
 
+for i = 1, (ARGC or 0) do
+    local a = ARGS[i]
+    if a == "-h" or a == "--help" then
+        print("usage: exec CMD [ARG]...")
+        return
+    end
+end
+
 if not ARGC or ARGC == 0 then
     io.stderr:write("exec: missing command\n")
     return

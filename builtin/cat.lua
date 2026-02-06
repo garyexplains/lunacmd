@@ -6,6 +6,14 @@ local function resolve_path(path)
     return base .. "/" .. path
 end
 
+for i = 1, (ARGC or 0) do
+    local a = ARGS[i]
+    if a == "-h" or a == "--help" then
+        print("usage: cat [FILE]...")
+        return
+    end
+end
+
 local function cat_file(path)
     local resolved = resolve_path(path)
     local f = io.open(resolved, "rb")

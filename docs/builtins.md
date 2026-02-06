@@ -11,6 +11,13 @@ This lists builtins currently present in `builtin/`.
   - `cd` without args uses `$HOME` if available.
 - `source FILE`
   - Loads and executes a Lua file.
+- `alias`
+  - Manage command aliases.
+  - Examples:
+    - `alias less = more`
+    - `alias lstmp = ls /tmp`
+    - `alias` (list aliases)
+    - `alias name` (show one alias)
 - `setprompt [--cont] TEXT...`
   - Sets `PROMPT` (or `PROMPT_CONT` with `--cont`) at runtime.
 - `prompt`
@@ -31,14 +38,16 @@ This lists builtins currently present in `builtin/`.
 
 ## Filesystem and File Content
 
-- `ls [DIR]`
-  - Lists directory entries (pure Lua + internal runtime helper).
+- `ls [FILE]...`
+  - Pure-Lua `ls` with shell-style options for long format, sorting, recursion, indicators, color, and human-readable sizes.
 - `cat FILE...`
   - Prints file contents.
 - `mkdir [-p|--parents] DIR...`
   - Creates directories.
 - `rm [-i|--interactive] [-f|--force] FILE...`
   - Removes files (not directories).
+- `rmdir [-p|--parents] DIR...`
+  - Removes empty directories.
 - `cp [-f|--force] [-i|--interactive] [-R|-r|--recursive] [-v|--verbose] SRC... DST`
   - Copies files/directories.
 - `mv [-f|--force] [-i|--interactive] [-v|--verbose] SRC... DST`
@@ -54,6 +63,22 @@ This lists builtins currently present in `builtin/`.
 - `wc [-c] [-m] [-l] [-w] [-L] FILE...`
   - Counts bytes/chars/newlines/words/longest-line.
   - Default output is `-l -w -c`.
+- `hexdump [-x] [FILE]...`
+  - Default: hex + ASCII display.
+  - `-x`: raw hex-only output.
+  - Supports files and stdin (`-` or no file args).
+- `more [FILE]...`
+  - Pure-Lua pager with `less`-style basic controls in interactive mode:
+    - `space` (next page), `enter` (next line), `b` (back page), `/` (search), `n` (next match), `q` (quit)
+  - In non-interactive mode, prints all content.
+  - Supports files and stdin (`-` or no file args).
+- `head [FILE]...`
+  - Prints first 10 lines by default.
+  - `-n N[kbm]`: first N lines.
+  - `-c N[kbm]`: first N bytes.
+  - `-q`: never print file headers.
+  - `-v`: always print file headers.
+  - Supports files and stdin (`-` or no file args).
 
 ## External Command Bridge
 

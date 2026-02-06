@@ -29,6 +29,14 @@ local function normalize_path(path)
     return normalized
 end
 
+for i = 1, (ARGC or 0) do
+    local a = ARGS[i]
+    if a == "-h" or a == "--help" then
+        print("usage: cd [DIR]")
+        return
+    end
+end
+
 local base = G_CWD or "."
 local target = ARGS and ARGS[1] or nil
 

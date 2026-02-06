@@ -76,6 +76,31 @@ Disable user builtin lookup with:
 LUNACMD_NO_USER_BUILTINS=1 ./lunacmd
 ```
 
+## Aliases
+
+Aliases are stored in `ALIASES` and expanded before command resolution.
+
+Shell-style examples:
+
+```text
+alias less = more
+alias lstmp = ls /tmp
+```
+
+Argument passthrough works:
+
+```text
+alias ll = ls -l
+ll /tmp
+```
+
+Lua config (`~/.lunacmd.lua`) can define aliases directly:
+
+```lua
+alias("less", "more")
+alias("lstmp", "ls /tmp")
+```
+
 ## Multiline Input
 
 A trailing backslash `\` continues to the next line:

@@ -6,7 +6,7 @@ if ARGC and ARGC > 0 then
         local arg = ARGS[i]
         if arg == "-u" then
             use_utc = true
-        elseif arg == "--help" then
+        elseif arg == "-h" or arg == "--help" then
             print("usage: date [-u] [+FORMAT]")
             return
         elseif arg and arg:sub(1, 1) == "+" then

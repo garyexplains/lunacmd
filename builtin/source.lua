@@ -6,6 +6,14 @@ local function resolve_path(path)
     return base .. "/" .. path
 end
 
+for i = 1, (ARGC or 0) do
+    local a = ARGS[i]
+    if a == "-h" or a == "--help" then
+        print("usage: source FILE")
+        return
+    end
+end
+
 if not ARGC or ARGC == 0 then
     io.stderr:write("source: missing file operand\n")
     return

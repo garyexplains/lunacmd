@@ -114,6 +114,10 @@ end
 
 for i = 1, ARGC do
     local arg = ARGS[i] or ""
+    if parse_options and (arg == "-h" or arg == "--help") then
+        print("usage: mv [-f|--force] [-i|--interactive] [-v|--verbose] SRC... DST")
+        return
+    end
     if parse_options and arg == "--" then
         parse_options = false
     elseif parse_options and arg:sub(1, 2) == "--" and #arg > 2 then
@@ -163,8 +167,10 @@ local function remove_any(path)
             return false
         end
         for _, name in ipairs(entries) do
-            if not remove_any(join_path(path, name)) then
-                return false
+            if name ~= "." and name ~= ".." then
+                if not remove_any(join_path(path, name)) then
+                    return false
+                end
             end
         end
     end
@@ -224,8 +230,10 @@ local function copy_dir(src, dst)
     end
 
     for _, name in ipairs(entries) do
-        if not copy_any(join_path(src, name), join_path(dst, name)) then
-            return false
+        if name ~= "." and name ~= ".." then
+            if not copy_any(join_path(src, name), join_path(dst, name)) then
+                return false
+            end
         end
     end
     return true
