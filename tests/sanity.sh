@@ -40,6 +40,18 @@ assert_line_matches() {
     pass "$name"
 }
 
+assert_builtin_help() {
+    cmd="$1"
+
+    if [ "$cmd" != "ls" ]; then
+        out="$(printf '%s -h\nexit\n' "$cmd" | ./lunacmd 2>&1)"
+        assert_contains "$cmd -h prints usage" "$out" "usage: $cmd"
+    fi
+
+    out="$(printf '%s --help\nexit\n' "$cmd" | ./lunacmd 2>&1)"
+    assert_contains "$cmd --help prints usage" "$out" "usage: $cmd"
+}
+
 out="$(printf 'bad\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "bad builtin reports load error" "$out" "Failed to load builtin 'bad'"
 
@@ -48,6 +60,47 @@ assert_not_contains "ls /tmp does not error" "$out" "ls: cannot access '/tmp'"
 
 out="$(printf 'cd /tmp\nls definitely_missing_luna_dir\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "ls missing relative path reports absolute target" "$out" "ls: cannot access '/tmp/definitely_missing_luna_dir'"
+
+tmpdir_ls="$(mktemp -d)"
+trap 'rm -rf "$tmpdir_ls"' EXIT INT TERM
+mkdir -p "$tmpdir_ls/sub"
+printf 'visible\n' > "$tmpdir_ls/visible.txt"
+printf 'hidden\n' > "$tmpdir_ls/.hidden.txt"
+printf '#!/bin/sh\necho ok\n' > "$tmpdir_ls/run.sh"
+chmod +x "$tmpdir_ls/run.sh"
+printf 'nested\n' > "$tmpdir_ls/sub/nested.txt"
+
+out="$(printf 'ls -a %s\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_contains "ls -a includes current directory entry" "$out" "."
+assert_contains "ls -a includes parent directory entry" "$out" ".."
+assert_contains "ls -a includes hidden files" "$out" ".hidden.txt"
+
+out="$(printf 'ls -A %s\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_contains "ls -A still includes hidden files" "$out" ".hidden.txt"
+
+out="$(printf 'ls -d %s\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_contains "ls -d lists directory itself" "$out" "$tmpdir_ls"
+
+out="$(printf 'ls -F %s\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_contains "ls -F marks directories with slash" "$out" "sub/"
+assert_contains "ls -F marks executables with star" "$out" "run.sh*"
+
+out="$(printf 'ls -p %s\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_contains "ls -p marks directories with slash" "$out" "sub/"
+assert_not_contains "ls -p does not mark executables with star" "$out" "run.sh*"
+
+out="$(printf 'ls -l -n %s\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_line_matches "ls -l -n prints long numeric format" "$out" "^[d\\-l][rwx\\-]{9}[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+"
+
+out="$(printf 'ls -R %s\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_contains "ls -R prints subdirectory header" "$out" "sub:"
+assert_contains "ls -R prints nested file" "$out" "nested.txt"
+
+out="$(printf 'ls -l -h %s\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_line_matches "ls -h enables human-readable sizes" "$out" "[0-9](\\.[0-9])?[BKMGTP]"
+
+out="$(printf 'ls --help\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "ls --help prints usage text" "$out" "usage: ls"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM
@@ -194,6 +247,22 @@ out="$(printf 'rm -f %s/rm_b.txt\nrm -f %s/does_not_exist.txt\nexit\n' "$tmpdir8
 assert_not_contains "rm -f does not prompt" "$out" "rm: remove '$tmpdir8/rm_b.txt'?"
 assert_not_contains "rm -f suppresses missing-file errors" "$out" "No such file or directory"
 
+tmpdir_rmdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir" "$tmpdir2" "$tmpdir3" "$tmpdir4" "$tmpdir5" "$tmpdir6" "$tmpdir7" "$tmpdir8" "$tmpdir_rmdir"' EXIT INT TERM
+mkdir -p "$tmpdir_rmdir/empty"
+mkdir -p "$tmpdir_rmdir/nonempty"
+printf 'x\n' > "$tmpdir_rmdir/nonempty/file.txt"
+mkdir -p "$tmpdir_rmdir/p/a/b"
+
+out="$(printf 'rmdir %s/empty\ncd %s/empty\nexit\n' "$tmpdir_rmdir" "$tmpdir_rmdir" | ./lunacmd 2>&1)"
+assert_contains "rmdir removes empty directory" "$out" "cd: no such file or directory"
+
+out="$(printf 'rmdir %s/nonempty\nexit\n' "$tmpdir_rmdir" | ./lunacmd 2>&1)"
+assert_contains "rmdir rejects non-empty directory" "$out" "Directory not empty"
+
+out="$(printf 'rmdir -p %s/p/a/b\ncd %s/p\nexit\n' "$tmpdir_rmdir" "$tmpdir_rmdir" | ./lunacmd 2>&1)"
+assert_contains "rmdir -p removes parent chain" "$out" "cd: no such file or directory"
+
 out="$(printf 'sleep 0.01s 0.001m 0h 0d\necho slept\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "sleep supports summed durations with suffixes" "$out" "slept"
 
@@ -268,6 +337,23 @@ assert_contains "prompt fallback still allows execution" "$out" "ok"
 out="$(printf 'PROMPT_CONT="++ "\nprompt\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "custom continuation prompt can be configured" "$out" "PROMPT_CONT: ++ "
 
+out="$(printf 'alias less = more\necho alias_more_line :| less\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "alias supports command replacement" "$out" "alias_more_line"
+
+tmpdir15="$(mktemp -d)"
+trap 'rm -rf "$tmpdir" "$tmpdir2" "$tmpdir3" "$tmpdir4" "$tmpdir5" "$tmpdir6" "$tmpdir7" "$tmpdir8" "$tmpdir9" "$tmpdir10" "$tmpdir11" "$tmpdir12" "$tmpdir13" "$tmpdir14" "$tmpdir15"' EXIT INT TERM
+printf 'zz_alias_marker\n' > "$tmpdir15/marker.txt"
+out="$(printf 'alias lstmp = ls %s\nlstmp\nexit\n' "$tmpdir15" | ./lunacmd 2>&1)"
+assert_contains "alias supports value with arguments" "$out" "marker.txt"
+
+tmpdir16="$(mktemp -d)"
+trap 'rm -rf "$tmpdir" "$tmpdir2" "$tmpdir3" "$tmpdir4" "$tmpdir5" "$tmpdir6" "$tmpdir7" "$tmpdir8" "$tmpdir9" "$tmpdir10" "$tmpdir11" "$tmpdir12" "$tmpdir13" "$tmpdir14" "$tmpdir15" "$tmpdir16"' EXIT INT TERM
+cat > "$tmpdir16/.lunacmd.lua" <<'EOF'
+alias("rcalias", "echo from_rc_alias")
+EOF
+out="$(printf 'rcalias\nexit\n' | HOME="$tmpdir16" LUNACMD_NO_RC= ./lunacmd 2>&1)"
+assert_contains "aliases can be defined from ~/.lunacmd.lua via alias()" "$out" "from_rc_alias"
+
 tmpdir11="$(mktemp -d)"
 trap 'rm -rf "$tmpdir" "$tmpdir2" "$tmpdir3" "$tmpdir4" "$tmpdir5" "$tmpdir6" "$tmpdir7" "$tmpdir8" "$tmpdir9" "$tmpdir10" "$tmpdir11"' EXIT INT TERM
 mkdir -p "$tmpdir11/.lunacmd/builtin"
@@ -289,5 +375,77 @@ assert_not_contains "core precedence blocks user override by default" "$out" "US
 
 out="$(printf 'ubcmd\nexit\n' | HOME="$tmpdir11" LUNACMD_NO_USER_BUILTINS=1 ./lunacmd 2>&1)"
 assert_contains "LUNACMD_NO_USER_BUILTINS disables user builtin lookup" "$out" "Lua error:"
+
+tmpdir12="$(mktemp -d)"
+trap 'rm -rf "$tmpdir" "$tmpdir2" "$tmpdir3" "$tmpdir4" "$tmpdir5" "$tmpdir6" "$tmpdir7" "$tmpdir8" "$tmpdir9" "$tmpdir10" "$tmpdir11" "$tmpdir12"' EXIT INT TERM
+printf 'ABC\n' > "$tmpdir12/h.txt"
+
+out="$(printf 'hexdump %s/h.txt\nexit\n' "$tmpdir12" | ./lunacmd 2>&1)"
+assert_contains "hexdump default includes offset" "$out" "00000000"
+assert_contains "hexdump default includes hex bytes" "$out" "41 42 43 0a"
+assert_contains "hexdump default includes ascii panel" "$out" "|ABC."
+
+out="$(printf 'hexdump -x %s/h.txt\nexit\n' "$tmpdir12" | ./lunacmd 2>&1)"
+assert_contains "hexdump -x outputs raw hex" "$out" "41 42 43 0a"
+
+out="$(printf 'echo ABC :| hexdump -x\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "hexdump reads stdin in pipeline" "$out" "41 42 43 0a"
+
+for cmd in \
+    alias cat cd cksum clear cp date echo exec fold head hexdump inca ls mkdir more mv prompt pwd rm rmdir setprompt sleep source type wc which
+do
+    assert_builtin_help "$cmd"
+done
+
+tmpdir13="$(mktemp -d)"
+trap 'rm -rf "$tmpdir" "$tmpdir2" "$tmpdir3" "$tmpdir4" "$tmpdir5" "$tmpdir6" "$tmpdir7" "$tmpdir8" "$tmpdir9" "$tmpdir10" "$tmpdir11" "$tmpdir12" "$tmpdir13"' EXIT INT TERM
+printf 'm1\nm2\n' > "$tmpdir13/more.txt"
+
+out="$(printf 'more %s/more.txt\nexit\n' "$tmpdir13" | ./lunacmd 2>&1)"
+assert_contains "more prints file content in non-interactive mode" "$out" "m1"
+assert_contains "more prints full file content in non-interactive mode" "$out" "m2"
+
+out="$(printf 'echo piped_more :| more\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "more reads stdin in pipeline" "$out" "piped_more"
+
+tmpdir14="$(mktemp -d)"
+trap 'rm -rf "$tmpdir" "$tmpdir2" "$tmpdir3" "$tmpdir4" "$tmpdir5" "$tmpdir6" "$tmpdir7" "$tmpdir8" "$tmpdir9" "$tmpdir10" "$tmpdir11" "$tmpdir12" "$tmpdir13" "$tmpdir14"' EXIT INT TERM
+cat > "$tmpdir14/a.txt" <<'EOF'
+l1
+l2
+l3
+l4
+l5
+l6
+l7
+l8
+l9
+l10
+l11
+EOF
+printf 'ABCDEFGH' > "$tmpdir14/b.bin"
+
+out="$(printf 'head %s/a.txt\nexit\n' "$tmpdir14" | ./lunacmd 2>&1)"
+assert_contains "head default prints first 10 lines" "$out" "l10"
+assert_not_contains "head default does not print line 11" "$out" "l11"
+
+out="$(printf 'head -n 3 %s/a.txt\nexit\n' "$tmpdir14" | ./lunacmd 2>&1)"
+assert_contains "head -n prints first N lines" "$out" "l3"
+assert_not_contains "head -n excludes later lines" "$out" "l4"
+
+out="$(printf 'head -c 1k %s/b.bin\nexit\n' "$tmpdir14" | ./lunacmd 2>&1)"
+assert_contains "head -c with suffix prints bytes" "$out" "ABCDEFGH"
+
+out="$(printf 'head %s/a.txt %s/a.txt\nexit\n' "$tmpdir14" "$tmpdir14" | ./lunacmd 2>&1)"
+assert_contains "head prints headers for multiple files by default" "$out" "==> $tmpdir14/a.txt <=="
+
+out="$(printf 'head -q %s/a.txt %s/a.txt\nexit\n' "$tmpdir14" "$tmpdir14" | ./lunacmd 2>&1)"
+assert_not_contains "head -q suppresses headers" "$out" "==> $tmpdir14/a.txt <=="
+
+out="$(printf 'head -v %s/a.txt\nexit\n' "$tmpdir14" | ./lunacmd 2>&1)"
+assert_contains "head -v forces headers" "$out" "==> $tmpdir14/a.txt <=="
+
+out="$(printf 'echo stdin_line :| head -n 1\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "head reads stdin in pipeline" "$out" "stdin_line"
 
 printf "All sanity checks passed.\n"

@@ -72,6 +72,9 @@ for i = 1, (ARGC or 0) do
     local arg = ARGS[i] or ""
     if parse_options and arg == "--" then
         parse_options = false
+    elseif parse_options and (arg == "-h" or arg == "--help") then
+        print("usage: wc [-c] [-m] [-l] [-w] [-L] [FILE]...")
+        return
     elseif parse_options and arg:sub(1, 1) == "-" and #arg > 1 then
         for j = 2, #arg do
             local flag = arg:sub(j, j)

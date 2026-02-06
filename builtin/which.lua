@@ -1,3 +1,11 @@
+for i = 1, (ARGC or 0) do
+    local a = ARGS[i]
+    if a == "-h" or a == "--help" then
+        print("usage: which CMD...")
+        return
+    end
+end
+
 if not ARGC or ARGC == 0 then
     io.stderr:write("which: missing command operand\n")
     return

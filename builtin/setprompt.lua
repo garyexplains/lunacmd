@@ -1,3 +1,11 @@
+for i = 1, (ARGC or 0) do
+    local a = ARGS[i]
+    if a == "-h" or a == "--help" then
+        print("usage: setprompt [--cont] TEXT...")
+        return
+    end
+end
+
 local set_cont = false
 local start_idx = 1
 

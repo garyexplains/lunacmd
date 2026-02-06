@@ -50,6 +50,7 @@ source hello.lua
 - `docs/language.md`
 - `docs/builtins.md`
 - `docs/development.md`
+- `docs/lua-cheatsheet.md`
 
 ## Current Status
 

@@ -67,3 +67,4 @@ source hello.lua
   - `:>`, `:>>`, `:<`, `:|`
 - Use `:!` prefix to opt into legacy shell symbols (`>`, `<`, `|`, etc.).
 - Prompt customization (`PROMPT`, `PROMPT_CONT`) is documented in `docs/language.md`.
+- Lua one-liners and quick tricks are in `docs/lua-cheatsheet.md`.

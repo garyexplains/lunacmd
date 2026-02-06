@@ -16,11 +16,14 @@
 #include <readline/history.h>
 #include <readline/readline.h>
 #include <limits.h>
+#include <grp.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -84,6 +87,11 @@ typedef struct PipelineNode {
 typedef struct CommandAst {
     PipelineNode pipeline;
 } CommandAst;
+
+static int next_token(
+    const char **input, ParseSyntaxMode mode, Token *out, char *err, size_t err_size);
+static char *dup_cstr(const char *s);
+static void free_token(Token *token);
 
 static int starts_with(const char *s, const char *prefix) {
     return strncmp(s, prefix, strlen(prefix)) == 0;
@@ -163,6 +171,196 @@ static int lua_resolve_cmd(lua_State *L) {
         lua_pushstring(L, "lua-fallback");
         lua_settable(L, -3);
     }
+    return 1;
+}
+
+static int lua_alias_fn(lua_State *L) {
+    const char *name = luaL_checkstring(L, 1);
+    const char *value = luaL_checkstring(L, 2);
+
+    lua_getglobal(L, "ALIASES");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+    }
+    lua_pushstring(L, name);
+    lua_pushstring(L, value);
+    lua_settable(L, -3);
+    lua_setglobal(L, "ALIASES");
+
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int get_alias_value(lua_State *L, const char *name, char **out_value) {
+    const char *value;
+    *out_value = NULL;
+
+    lua_getglobal(L, "ALIASES");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return 0;
+    }
+
+    lua_pushstring(L, name);
+    lua_gettable(L, -2);
+    if (!lua_isstring(L, -1)) {
+        lua_pop(L, 2);
+        return 0;
+    }
+
+    value = lua_tostring(L, -1);
+    *out_value = dup_cstr(value);
+    lua_pop(L, 2);
+    return *out_value ? 1 : 0;
+}
+
+static void free_argv_list(char **argv, int argc) {
+    int i;
+    for (i = 0; i < argc; i++) {
+        free(argv[i]);
+    }
+    free(argv);
+}
+
+static int parse_words_only(const char *line, char ***argv_out, int *argc_out, char *err, size_t err_size) {
+    const char *p = line;
+    Token tok;
+    int argc = 0;
+    char **argv = NULL;
+
+    while (1) {
+        char **next;
+        if (!next_token(&p, SYNTAX_LUNA, &tok, err, err_size)) {
+            free_argv_list(argv, argc);
+            return 0;
+        }
+        if (tok.type == TOKEN_EOF) {
+            break;
+        }
+        if (tok.type != TOKEN_WORD) {
+            snprintf(err, err_size, "alias value must be plain command words");
+            free_token(&tok);
+            free_argv_list(argv, argc);
+            return 0;
+        }
+
+        next = realloc(argv, sizeof(char *) * (size_t)(argc + 1));
+        if (!next) {
+            free_token(&tok);
+            snprintf(err, err_size, "out of memory");
+            free_argv_list(argv, argc);
+            return 0;
+        }
+        argv = next;
+        argv[argc] = tok.text;
+        tok.text = NULL;
+        argc++;
+        free_token(&tok);
+    }
+
+    *argv_out = argv;
+    *argc_out = argc;
+    return 1;
+}
+
+static int copy_command_argv(const CommandNode *cmd, char ***argv_out, int *argc_out, char *err, size_t err_size) {
+    int i;
+    char **argv = NULL;
+
+    if (cmd->argc == 0) {
+        *argv_out = NULL;
+        *argc_out = 0;
+        return 1;
+    }
+
+    argv = calloc((size_t)cmd->argc, sizeof(char *));
+    if (!argv) {
+        snprintf(err, err_size, "out of memory");
+        return 0;
+    }
+    for (i = 0; i < cmd->argc; i++) {
+        argv[i] = dup_cstr(cmd->argv[i]);
+        if (!argv[i]) {
+            free_argv_list(argv, i);
+            snprintf(err, err_size, "out of memory");
+            return 0;
+        }
+    }
+    *argv_out = argv;
+    *argc_out = cmd->argc;
+    return 1;
+}
+
+static int expand_alias_argv(
+    lua_State *L, const CommandNode *cmd, char ***argv_out, int *argc_out, char *err, size_t err_size) {
+    int depth = 0;
+    char **argv = NULL;
+    int argc = 0;
+
+    if (!copy_command_argv(cmd, &argv, &argc, err, err_size)) {
+        return 0;
+    }
+
+    while (argc > 0 && depth < 16) {
+        char *alias_value = NULL;
+        char **prefix = NULL;
+        int prefix_argc = 0;
+        char **next_argv = NULL;
+        int i;
+        size_t next_count;
+
+        if (!get_alias_value(L, argv[0], &alias_value)) {
+            break;
+        }
+
+        if (!parse_words_only(alias_value, &prefix, &prefix_argc, err, err_size)) {
+            free(alias_value);
+            free_argv_list(argv, argc);
+            return 0;
+        }
+        free(alias_value);
+
+        if (prefix_argc == 0) {
+            free_argv_list(prefix, prefix_argc);
+            free_argv_list(argv, argc);
+            snprintf(err, err_size, "alias expansion cannot be empty");
+            return 0;
+        }
+
+        next_count = (size_t)prefix_argc + (size_t)(argc > 0 ? argc - 1 : 0);
+        next_argv = calloc(next_count, sizeof(char *));
+        if (!next_argv) {
+            free_argv_list(prefix, prefix_argc);
+            free_argv_list(argv, argc);
+            snprintf(err, err_size, "out of memory");
+            return 0;
+        }
+
+        for (i = 0; i < prefix_argc; i++) {
+            next_argv[i] = prefix[i];
+            prefix[i] = NULL;
+        }
+        for (i = 1; i < argc; i++) {
+            next_argv[prefix_argc + i - 1] = argv[i];
+            argv[i] = NULL;
+        }
+
+        free_argv_list(prefix, prefix_argc);
+        free_argv_list(argv, argc);
+        argv = next_argv;
+        argc = (int)next_count;
+        depth++;
+    }
+
+    if (depth >= 16) {
+        free_argv_list(argv, argc);
+        snprintf(err, err_size, "alias expansion too deep");
+        return 0;
+    }
+
+    *argv_out = argv;
+    *argc_out = argc;
     return 1;
 }
 
@@ -296,9 +494,6 @@ static int lua_listdir(lua_State *L) {
 
     lua_newtable(L);
     while ((entry = readdir(dir)) != NULL) {
-        if ((strcmp(entry->d_name, ".") == 0) || (strcmp(entry->d_name, "..") == 0)) {
-            continue;
-        }
         lua_pushinteger(L, idx++);
         lua_pushstring(L, entry->d_name);
         lua_settable(L, -3);
@@ -371,6 +566,190 @@ static int lua_sleep(lua_State *L) {
     }
 
     lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int lua_getch(lua_State *L) {
+    int fd = open("/dev/tty", O_RDONLY);
+    struct termios oldt;
+    struct termios raw;
+    unsigned char ch;
+    ssize_t nread;
+
+    if (fd < 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, strerror(errno));
+        return 2;
+    }
+
+    if (tcgetattr(fd, &oldt) != 0) {
+        close(fd);
+        lua_pushnil(L);
+        lua_pushstring(L, strerror(errno));
+        return 2;
+    }
+
+    raw = oldt;
+    raw.c_lflag &= (tcflag_t) ~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+
+    if (tcsetattr(fd, TCSANOW, &raw) != 0) {
+        close(fd);
+        lua_pushnil(L);
+        lua_pushstring(L, strerror(errno));
+        return 2;
+    }
+
+    nread = read(fd, &ch, 1);
+    tcsetattr(fd, TCSANOW, &oldt);
+    close(fd);
+
+    if (nread != 1) {
+        lua_pushnil(L);
+        lua_pushstring(L, "failed to read character");
+        return 2;
+    }
+
+    lua_pushlstring(L, (const char *)&ch, 1);
+    return 1;
+}
+
+static void push_stat_table(lua_State *L, const struct stat *st) {
+    const char *kind = "unknown";
+
+    if (S_ISREG(st->st_mode)) {
+        kind = "file";
+    } else if (S_ISDIR(st->st_mode)) {
+        kind = "dir";
+    } else if (S_ISLNK(st->st_mode)) {
+        kind = "symlink";
+    } else if (S_ISCHR(st->st_mode)) {
+        kind = "char";
+    } else if (S_ISBLK(st->st_mode)) {
+        kind = "block";
+    } else if (S_ISFIFO(st->st_mode)) {
+        kind = "fifo";
+    } else if (S_ISSOCK(st->st_mode)) {
+        kind = "socket";
+    }
+
+    lua_newtable(L);
+
+    lua_pushstring(L, "mode");
+    lua_pushinteger(L, (lua_Integer)st->st_mode);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "nlink");
+    lua_pushinteger(L, (lua_Integer)st->st_nlink);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "uid");
+    lua_pushinteger(L, (lua_Integer)st->st_uid);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "gid");
+    lua_pushinteger(L, (lua_Integer)st->st_gid);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "size");
+    lua_pushinteger(L, (lua_Integer)st->st_size);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "atime");
+    lua_pushinteger(L, (lua_Integer)st->st_atime);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "mtime");
+    lua_pushinteger(L, (lua_Integer)st->st_mtime);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "ctime");
+    lua_pushinteger(L, (lua_Integer)st->st_ctime);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "ino");
+    lua_pushinteger(L, (lua_Integer)st->st_ino);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "blocks");
+    lua_pushinteger(L, (lua_Integer)st->st_blocks);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "blksize");
+    lua_pushinteger(L, (lua_Integer)st->st_blksize);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "kind");
+    lua_pushstring(L, kind);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "executable");
+    lua_pushboolean(L, (st->st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0);
+    lua_settable(L, -3);
+}
+
+static int lua_stat(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    int follow = lua_toboolean(L, 2);
+    struct stat st;
+    int rc;
+
+    if (follow) {
+        rc = stat(path, &st);
+    } else {
+        rc = lstat(path, &st);
+    }
+    if (rc != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, strerror(errno));
+        return 2;
+    }
+
+    push_stat_table(L, &st);
+    return 1;
+}
+
+static int lua_readlink(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    char buf[PATH_MAX];
+    ssize_t n = readlink(path, buf, sizeof(buf) - 1);
+
+    if (n < 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, strerror(errno));
+        return 2;
+    }
+    buf[n] = '\0';
+    lua_pushstring(L, buf);
+    return 1;
+}
+
+static int lua_uid_name(lua_State *L) {
+    uid_t uid = (uid_t)luaL_checkinteger(L, 1);
+    struct passwd *pw = getpwuid(uid);
+    if (!pw || !pw->pw_name) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushstring(L, pw->pw_name);
+    return 1;
+}
+
+static int lua_gid_name(lua_State *L) {
+    gid_t gid = (gid_t)luaL_checkinteger(L, 1);
+    struct group *gr = getgrgid(gid);
+    if (!gr || !gr->gr_name) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushstring(L, gr->gr_name);
+    return 1;
+}
+
+static int lua_isatty(lua_State *L) {
+    int fd = (int)luaL_optinteger(L, 1, STDOUT_FILENO);
+    lua_pushboolean(L, isatty(fd) ? 1 : 0);
     return 1;
 }
 
@@ -1087,16 +1466,31 @@ static void build_lua_fallback_chunk(const CommandNode *cmd, char *out, size_t o
 static int execute_single_command(
     lua_State *L, const CommandNode *cmd, const char *original_line, int force_reconstructed_chunk) {
     int status, result;
+    CommandNode effective = {0};
+    char **expanded_argv = NULL;
+    int expanded_argc = 0;
     int has_builtin = 0;
     int is_user_builtin = 0;
     char builtin_path[PATH_MAX];
     char fallback_chunk[1024];
     FdSnapshot snap;
     char redir_err[MAX_PARSE_ERR];
+    char alias_err[MAX_PARSE_ERR];
 
-    set_lua_command_globals(L, cmd);
+    if (!expand_alias_argv(L, cmd, &expanded_argv, &expanded_argc, alias_err, sizeof(alias_err))) {
+        fprintf(stderr, "Alias error: %s\n", alias_err);
+        free_argv_list(expanded_argv, expanded_argc);
+        return 0;
+    }
+
+    effective.argc = expanded_argc;
+    effective.argv = expanded_argv;
+    effective.redir_count = cmd->redir_count;
+    effective.redirs = cmd->redirs;
+
+    set_lua_command_globals(L, &effective);
     has_builtin = resolve_builtin_path_for_name(
-        cmd->argv[0], builtin_path, sizeof(builtin_path), &is_user_builtin);
+        effective.argv[0], builtin_path, sizeof(builtin_path), &is_user_builtin);
 
     if (has_builtin) {
         lua_pushstring(L, is_user_builtin ? "user-builtin" : "core-builtin");
@@ -1114,6 +1508,7 @@ static int execute_single_command(
     if (!apply_redirections(L, cmd, &snap, redir_err, sizeof(redir_err))) {
         fprintf(stderr, "Redirection error: %s\n", redir_err);
         restore_redirections(&snap);
+        free_argv_list(expanded_argv, expanded_argc);
         return 0;
     }
 
@@ -1129,12 +1524,13 @@ static int execute_single_command(
             lua_pop(L, 1);
         }
         restore_redirections(&snap);
+        free_argv_list(expanded_argv, expanded_argc);
         return 1;
     } else {
         if (!has_builtin) {
             const char *chunk = original_line;
             if (force_reconstructed_chunk || cmd->redir_count > 0) {
-                build_lua_fallback_chunk(cmd, fallback_chunk, sizeof(fallback_chunk));
+                build_lua_fallback_chunk(&effective, fallback_chunk, sizeof(fallback_chunk));
                 chunk = fallback_chunk;
             }
 
@@ -1146,11 +1542,12 @@ static int execute_single_command(
             const char *load_err = lua_tostring(L, -1);
             fprintf(stderr,
                     "Failed to load builtin '%s': %s\n",
-                    cmd->argv[0],
+                    effective.argv[0],
                     load_err ? load_err : "unknown error");
             lua_pop(L, 1);
         }
         restore_redirections(&snap);
+        free_argv_list(expanded_argv, expanded_argc);
         return 1;
     }
 }
@@ -1274,8 +1671,24 @@ int main() {
     lua_setglobal(L, "_MKDIR");
     lua_pushcfunction(L, lua_sleep);
     lua_setglobal(L, "_SLEEP");
+    lua_pushcfunction(L, lua_getch);
+    lua_setglobal(L, "_GETCH");
     lua_pushcfunction(L, lua_resolve_cmd);
     lua_setglobal(L, "_RESOLVE_CMD");
+    lua_pushcfunction(L, lua_stat);
+    lua_setglobal(L, "_STAT");
+    lua_pushcfunction(L, lua_readlink);
+    lua_setglobal(L, "_READLINK");
+    lua_pushcfunction(L, lua_uid_name);
+    lua_setglobal(L, "_UID_NAME");
+    lua_pushcfunction(L, lua_gid_name);
+    lua_setglobal(L, "_GID_NAME");
+    lua_pushcfunction(L, lua_isatty);
+    lua_setglobal(L, "_ISATTY");
+    lua_pushcfunction(L, lua_alias_fn);
+    lua_setglobal(L, "alias");
+    lua_newtable(L);
+    lua_setglobal(L, "ALIASES");
 
     // Initialize shell working directory from process cwd.
     if (getcwd(cwd, sizeof(cwd)) != NULL) {

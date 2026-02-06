@@ -45,6 +45,9 @@ for i = 1, (ARGC or 0) do
     local arg = ARGS[i] or ""
     if parse_options and arg == "--" then
         parse_options = false
+    elseif parse_options and (arg == "-h" or arg == "--help") then
+        print("usage: rm [-f|--force] [-i|--interactive] FILE...")
+        return
     elseif parse_options and arg == "-i" then
         opts.interactive = true
         opts.force = false

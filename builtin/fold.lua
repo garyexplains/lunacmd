@@ -53,7 +53,10 @@ local i = 1
 
 while i <= (ARGC or 0) do
     local arg = ARGS[i]
-    if arg == "-s" then
+    if arg == "-h" or arg == "--help" then
+        print("usage: fold [-s] [-w WIDTH] [FILE]...")
+        return
+    elseif arg == "-s" then
         break_spaces = true
         i = i + 1
     elseif arg == "-w" then

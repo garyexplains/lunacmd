@@ -6,6 +6,14 @@ local function resolve_path(path)
     return base .. "/" .. path
 end
 
+for i = 1, (ARGC or 0) do
+    local a = ARGS[i]
+    if a == "-h" or a == "--help" then
+        print("usage: cksum FILE...")
+        return
+    end
+end
+
 local function build_crc32_table()
     local table_crc = {}
     for i = 0, 255 do

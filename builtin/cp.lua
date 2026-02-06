@@ -81,6 +81,10 @@ end
 
 for i = 1, ARGC do
     local arg = ARGS[i] or ""
+    if parse_options and (arg == "-h" or arg == "--help") then
+        print("usage: cp [-f|--force] [-i|--interactive] [-R|-r|--recursive] [-v|--verbose] SRC... DST")
+        return
+    end
     if parse_options and arg == "--" then
         parse_options = false
     elseif parse_options and arg:sub(1, 2) == "--" and #arg > 2 then
@@ -196,10 +200,12 @@ local function copy_dir(src, dst)
     end
 
     for _, name in ipairs(entries) do
-        local child_src = join_path(src, name)
-        local child_dst = join_path(dst, name)
-        if not copy_any(child_src, child_dst) then
-            return false
+        if name ~= "." and name ~= ".." then
+            local child_src = join_path(src, name)
+            local child_dst = join_path(dst, name)
+            if not copy_any(child_src, child_dst) then
+                return false
+            end
         end
     end
 
