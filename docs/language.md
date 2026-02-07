@@ -74,6 +74,38 @@ Event recall shortcuts:
 - `!N` command number `N`
 - `!-N` command `N` entries back
 
+## Job Control
+
+Background a command by ending the line with `&`:
+
+```text
+sleep 5s &
+```
+
+Manage jobs:
+
+- `jobs`
+- `fg %JOB`
+- `bg %JOB`
+
+Foreground jobs receive terminal signals (for example `Ctrl-C`) without exiting `lunacmd`.
+
+## Command Substitution (Backticks)
+
+In command mode for builtins (including `exec`), you can embed Lua expressions in backticks:
+
+```text
+ls `UTIL.trim("  /tmp  ")`
+echo hi :> `UTIL.trim("  /tmp/out.txt  ")`
+```
+
+Behavior:
+
+- backtick expressions are evaluated as Lua (`return <expr>`)
+- result is converted with `tostring(...)`
+- substitution applies to command arguments and redirection targets
+- substitution is not applied to plain Lua fallback lines
+
 ## TUI Mode
 
 Use the `tui` builtin to toggle the built-in full-screen terminal UI:
@@ -123,6 +155,24 @@ Disable user builtin lookup with:
 
 ```sh
 LUNACMD_NO_USER_BUILTINS=1 ./lunacmd
+```
+
+## Lua Helper Namespace (`UTIL`)
+
+`lunacmd` initializes a global `UTIL` table at startup so you can store reusable helper functions.
+
+Example `~/.lunacmd.lua`:
+
+```lua
+function UTIL.trim(s)
+  return (tostring(s):gsub("^%s+",""):gsub("%s+$",""))
+end
+```
+
+Then in `lunacmd`:
+
+```lua
+print(UTIL.trim("  bob  "))
 ```
 
 ## Aliases

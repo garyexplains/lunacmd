@@ -19,6 +19,7 @@
 #include <limits.h>
 #include <grp.h>
 #include <pwd.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,6 +99,18 @@ typedef struct LunaBufferState {
     int initialized;
 } LunaBufferState;
 
+typedef enum JobState {
+    JOB_RUNNING = 0,
+    JOB_STOPPED,
+} JobState;
+
+typedef struct Job {
+    int id;
+    pid_t pgid;
+    char *cmdline;
+    JobState state;
+} Job;
+
 static int next_token(
     const char **input, ParseSyntaxMode mode, Token *out, char *err, size_t err_size);
 static char *dup_cstr(const char *s);
@@ -105,6 +118,10 @@ static void free_token(Token *token);
 static LunaBufferState g_luna_buffer = {{0}, {0}, 16 * 1024, 0};
 static char g_history_path[PATH_MAX];
 static int g_history_path_ready = 0;
+static Job *g_jobs = NULL;
+static int g_job_count = 0;
+static int g_next_job_id = 1;
+static pid_t g_shell_pgid = 0;
 
 static int starts_with(const char *s, const char *prefix) {
     return strncmp(s, prefix, strlen(prefix)) == 0;
@@ -298,6 +315,85 @@ static int path_is_readable_file(const char *path) {
         return 0;
     }
     return S_ISREG(st.st_mode) ? 1 : 0;
+}
+
+static Job *find_job_by_id(int id) {
+    int i;
+    for (i = 0; i < g_job_count; i++) {
+        if (g_jobs[i].id == id) {
+            return &g_jobs[i];
+        }
+    }
+    return NULL;
+}
+
+static void remove_job_index(int idx) {
+    int i;
+    if (idx < 0 || idx >= g_job_count) {
+        return;
+    }
+    free(g_jobs[idx].cmdline);
+    for (i = idx; i + 1 < g_job_count; i++) {
+        g_jobs[i] = g_jobs[i + 1];
+    }
+    g_job_count--;
+    if (g_job_count == 0) {
+        g_next_job_id = 1;
+        free(g_jobs);
+        g_jobs = NULL;
+    } else {
+        Job *next = realloc(g_jobs, sizeof(Job) * (size_t)g_job_count);
+        if (next) {
+            g_jobs = next;
+        }
+    }
+}
+
+static int add_job(pid_t pgid, const char *cmdline, JobState state) {
+    Job *next;
+    next = realloc(g_jobs, sizeof(Job) * (size_t)(g_job_count + 1));
+    if (!next) {
+        return -1;
+    }
+    g_jobs = next;
+    g_jobs[g_job_count].id = g_next_job_id++;
+    g_jobs[g_job_count].pgid = pgid;
+    g_jobs[g_job_count].cmdline = dup_cstr(cmdline ? cmdline : "");
+    if (!g_jobs[g_job_count].cmdline) {
+        return -1;
+    }
+    g_jobs[g_job_count].state = state;
+    g_job_count++;
+    return g_jobs[g_job_count - 1].id;
+}
+
+static void poll_jobs(void) {
+    int status;
+    pid_t pid;
+
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0) {
+        int i;
+        for (i = 0; i < g_job_count; i++) {
+            if (g_jobs[i].pgid == pid) {
+                if (WIFSTOPPED(status)) {
+                    g_jobs[i].state = JOB_STOPPED;
+                } else if (WIFCONTINUED(status)) {
+                    g_jobs[i].state = JOB_RUNNING;
+                } else if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                    remove_job_index(i);
+                }
+                break;
+            }
+        }
+    }
+}
+
+static void reset_child_signals(void) {
+    signal(SIGINT, SIG_DFL);
+    signal(SIGQUIT, SIG_DFL);
+    signal(SIGTSTP, SIG_DFL);
+    signal(SIGTTIN, SIG_DFL);
+    signal(SIGTTOU, SIG_DFL);
 }
 
 static int resolve_builtin_path_for_name(
@@ -1206,6 +1302,125 @@ static int lua_history_path(lua_State *L) {
     return 1;
 }
 
+static int lua_jobs_list(lua_State *L) {
+    int i;
+    poll_jobs();
+    lua_newtable(L);
+    for (i = 0; i < g_job_count; i++) {
+        lua_newtable(L);
+        lua_pushstring(L, "id");
+        lua_pushinteger(L, g_jobs[i].id);
+        lua_settable(L, -3);
+        lua_pushstring(L, "pgid");
+        lua_pushinteger(L, (lua_Integer)g_jobs[i].pgid);
+        lua_settable(L, -3);
+        lua_pushstring(L, "state");
+        lua_pushstring(L, g_jobs[i].state == JOB_RUNNING ? "running" : "stopped");
+        lua_settable(L, -3);
+        lua_pushstring(L, "cmd");
+        lua_pushstring(L, g_jobs[i].cmdline ? g_jobs[i].cmdline : "");
+        lua_settable(L, -3);
+        lua_pushinteger(L, i + 1);
+        lua_pushvalue(L, -2);
+        lua_settable(L, -4);
+        lua_pop(L, 1);
+    }
+    return 1;
+}
+
+static int wait_foreground_job(pid_t pgid, int *stopped_out, int *status_out) {
+    int status = 0;
+    pid_t r;
+    int has_tty = isatty(STDIN_FILENO);
+    *stopped_out = 0;
+    *status_out = 0;
+
+    if (has_tty) {
+        tcsetpgrp(STDIN_FILENO, pgid);
+    }
+    r = waitpid(pgid, &status, WUNTRACED);
+    if (has_tty) {
+        tcsetpgrp(STDIN_FILENO, g_shell_pgid);
+    }
+
+    if (r < 0) {
+        return 0;
+    }
+    if (WIFSTOPPED(status)) {
+        *stopped_out = 1;
+        return 1;
+    }
+    if (WIFEXITED(status)) {
+        *status_out = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        *status_out = 128 + WTERMSIG(status);
+    }
+    return 1;
+}
+
+static int lua_job_fg(lua_State *L) {
+    int id = (int)luaL_checkinteger(L, 1);
+    Job *job = find_job_by_id(id);
+    int stopped = 0;
+    int status = 0;
+    int idx;
+
+    poll_jobs();
+    if (!job) {
+        lua_pushnil(L);
+        lua_pushstring(L, "job not found");
+        return 2;
+    }
+
+    if (kill(-job->pgid, SIGCONT) != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, strerror(errno));
+        return 2;
+    }
+    job->state = JOB_RUNNING;
+
+    if (!wait_foreground_job(job->pgid, &stopped, &status)) {
+        lua_pushnil(L);
+        lua_pushstring(L, strerror(errno));
+        return 2;
+    }
+
+    if (stopped) {
+        job->state = JOB_STOPPED;
+    } else {
+        for (idx = 0; idx < g_job_count; idx++) {
+            if (g_jobs[idx].id == id) {
+                remove_job_index(idx);
+                break;
+            }
+        }
+    }
+
+    lua_pushboolean(L, 1);
+    lua_pushinteger(L, status);
+    return 2;
+}
+
+static int lua_job_bg(lua_State *L) {
+    int id = (int)luaL_checkinteger(L, 1);
+    Job *job;
+    poll_jobs();
+    job = find_job_by_id(id);
+    if (!job) {
+        lua_pushnil(L);
+        lua_pushstring(L, "job not found");
+        return 2;
+    }
+    if (kill(-job->pgid, SIGCONT) != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, strerror(errno));
+        return 2;
+    }
+    job->state = JOB_RUNNING;
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 static void free_token(Token *token) {
     if (token->text) {
         free(token->text);
@@ -1431,6 +1646,34 @@ static int next_token(const char **input, ParseSyntaxMode mode, Token *out, char
             }
             if (match_operator(p, mode, &op_type, &op_len)) {
                 break;
+            }
+            if (*p == '`') {
+                if (!append_char(&word, &word_len, &word_cap, *p)) {
+                    snprintf(err, err_size, "out of memory");
+                    free(word);
+                    return 0;
+                }
+                p++;
+                while (*p && *p != '`') {
+                    if (!append_char(&word, &word_len, &word_cap, *p)) {
+                        snprintf(err, err_size, "out of memory");
+                        free(word);
+                        return 0;
+                    }
+                    p++;
+                }
+                if (*p != '`') {
+                    snprintf(err, err_size, "unterminated command substitution");
+                    free(word);
+                    return 0;
+                }
+                if (!append_char(&word, &word_len, &word_cap, *p)) {
+                    snprintf(err, err_size, "out of memory");
+                    free(word);
+                    return 0;
+                }
+                p++;
+                continue;
             }
         }
 
@@ -2183,6 +2426,208 @@ static int expand_builtin_globs(lua_State *L, char ***argv_ptr, int *argc_ptr, c
     return 1;
 }
 
+static int eval_lua_expr_to_string(lua_State *L, const char *expr, char **out, char *err, size_t err_size) {
+    char *chunk = NULL;
+    size_t chunk_len = 0;
+    size_t chunk_cap = 0;
+    int status;
+    const char *result_str;
+
+    *out = NULL;
+
+    if (!append_bytes(&chunk, &chunk_len, &chunk_cap, "return ", 7)
+        || !append_bytes(&chunk, &chunk_len, &chunk_cap, expr, strlen(expr))
+        || !append_char(&chunk, &chunk_len, &chunk_cap, '\0')) {
+        free(chunk);
+        snprintf(err, err_size, "out of memory");
+        return 0;
+    }
+
+    status = luaL_loadstring(L, chunk);
+    free(chunk);
+    if (status != LUA_OK) {
+        snprintf(err, err_size, "command substitution load error: %s", lua_tostring(L, -1));
+        lua_pop(L, 1);
+        return 0;
+    }
+
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+        snprintf(err, err_size, "command substitution runtime error: %s", lua_tostring(L, -1));
+        lua_pop(L, 1);
+        return 0;
+    }
+
+    luaL_tolstring(L, -1, NULL);
+    result_str = lua_tostring(L, -1);
+    *out = dup_cstr(result_str ? result_str : "");
+    lua_pop(L, 2);
+
+    if (!*out) {
+        snprintf(err, err_size, "out of memory");
+        return 0;
+    }
+    return 1;
+}
+
+static int expand_backticks_in_text(lua_State *L, const char *input, char **out, char *err, size_t err_size) {
+    char *buf = NULL;
+    size_t buf_len = 0;
+    size_t buf_cap = 0;
+    size_t i = 0;
+
+    *out = NULL;
+    if (!input) {
+        *out = dup_cstr("");
+        return *out != NULL;
+    }
+
+    while (input[i]) {
+        if (input[i] == '`') {
+            char *expr = NULL;
+            size_t expr_len = 0;
+            size_t expr_cap = 0;
+            char *subst = NULL;
+
+            i++;
+            while (input[i] && input[i] != '`') {
+                if (input[i] == '\\' && input[i + 1] == '`') {
+                    if (!append_char(&expr, &expr_len, &expr_cap, '`')) {
+                        free(expr);
+                        free(buf);
+                        snprintf(err, err_size, "out of memory");
+                        return 0;
+                    }
+                    i += 2;
+                    continue;
+                }
+                if (!append_char(&expr, &expr_len, &expr_cap, input[i])) {
+                    free(expr);
+                    free(buf);
+                    snprintf(err, err_size, "out of memory");
+                    return 0;
+                }
+                i++;
+            }
+            if (input[i] != '`') {
+                free(expr);
+                free(buf);
+                snprintf(err, err_size, "unterminated command substitution");
+                return 0;
+            }
+            i++;
+
+            if (!append_char(&expr, &expr_len, &expr_cap, '\0')) {
+                free(expr);
+                free(buf);
+                snprintf(err, err_size, "out of memory");
+                return 0;
+            }
+            if (!eval_lua_expr_to_string(L, expr, &subst, err, err_size)) {
+                free(expr);
+                free(buf);
+                return 0;
+            }
+            free(expr);
+
+            if (!append_bytes(&buf, &buf_len, &buf_cap, subst, strlen(subst))) {
+                free(subst);
+                free(buf);
+                snprintf(err, err_size, "out of memory");
+                return 0;
+            }
+            free(subst);
+            continue;
+        }
+
+        if (input[i] == '\\' && input[i + 1] == '`') {
+            if (!append_char(&buf, &buf_len, &buf_cap, '`')) {
+                free(buf);
+                snprintf(err, err_size, "out of memory");
+                return 0;
+            }
+            i += 2;
+            continue;
+        }
+
+        if (!append_char(&buf, &buf_len, &buf_cap, input[i])) {
+            free(buf);
+            snprintf(err, err_size, "out of memory");
+            return 0;
+        }
+        i++;
+    }
+
+    if (!append_char(&buf, &buf_len, &buf_cap, '\0')) {
+        free(buf);
+        snprintf(err, err_size, "out of memory");
+        return 0;
+    }
+    *out = buf;
+    return 1;
+}
+
+static int expand_backticks_in_argv(lua_State *L, char **argv, int argc, char *err, size_t err_size) {
+    int i;
+    for (i = 1; i < argc; i++) {
+        char *expanded = NULL;
+        if (!expand_backticks_in_text(L, argv[i], &expanded, err, err_size)) {
+            return 0;
+        }
+        free(argv[i]);
+        argv[i] = expanded;
+    }
+    return 1;
+}
+
+static int clone_and_expand_redirs(
+    lua_State *L, const CommandNode *cmd, Redirection **out_redirs, int *out_count, char *err, size_t err_size) {
+    Redirection *arr = NULL;
+    int i;
+
+    *out_redirs = NULL;
+    *out_count = 0;
+    if (cmd->redir_count <= 0) {
+        return 1;
+    }
+
+    arr = calloc((size_t)cmd->redir_count, sizeof(Redirection));
+    if (!arr) {
+        snprintf(err, err_size, "out of memory");
+        return 0;
+    }
+
+    for (i = 0; i < cmd->redir_count; i++) {
+        arr[i].type = cmd->redirs[i].type;
+        if (cmd->redirs[i].target) {
+            if (!expand_backticks_in_text(L, cmd->redirs[i].target, &arr[i].target, err, err_size)) {
+                int j;
+                for (j = 0; j <= i; j++) {
+                    free(arr[j].target);
+                }
+                free(arr);
+                return 0;
+            }
+        } else {
+            arr[i].target = NULL;
+        }
+    }
+
+    *out_redirs = arr;
+    *out_count = cmd->redir_count;
+    return 1;
+}
+
+static void free_redirs_copy(Redirection *redirs, int count) {
+    int i;
+    if (!redirs) {
+        return;
+    }
+    for (i = 0; i < count; i++) {
+        free(redirs[i].target);
+    }
+    free(redirs);
+}
+
 static void tui_move_cursor(int row, int col) {
     if (row < 1) {
         row = 1;
@@ -2441,6 +2886,9 @@ static int execute_single_command(
     char redir_err[MAX_PARSE_ERR];
     char alias_err[MAX_PARSE_ERR];
     char glob_err[MAX_PARSE_ERR];
+    char subst_err[MAX_PARSE_ERR];
+    Redirection *expanded_redirs = NULL;
+    int expanded_redir_count = 0;
 
     if (!expand_alias_argv(L, cmd, &expanded_argv, &expanded_argc, alias_err, sizeof(alias_err))) {
         fprintf(stderr, "Alias error: %s\n", alias_err);
@@ -2457,8 +2905,23 @@ static int execute_single_command(
         effective.argv[0], builtin_path, sizeof(builtin_path), &is_user_builtin);
 
     if (has_builtin) {
+        if (!expand_backticks_in_argv(L, expanded_argv, expanded_argc, subst_err, sizeof(subst_err))) {
+            fprintf(stderr, "Substitution error: %s\n", subst_err);
+            free_argv_list(expanded_argv, expanded_argc);
+            return 0;
+        }
+        if (!clone_and_expand_redirs(
+                L, cmd, &expanded_redirs, &expanded_redir_count, subst_err, sizeof(subst_err))) {
+            fprintf(stderr, "Substitution error: %s\n", subst_err);
+            free_argv_list(expanded_argv, expanded_argc);
+            return 0;
+        }
+        effective.redirs = expanded_redirs;
+        effective.redir_count = expanded_redir_count;
+
         if (!expand_builtin_globs(L, &expanded_argv, &expanded_argc, glob_err, sizeof(glob_err))) {
             fprintf(stderr, "Glob error: %s\n", glob_err);
+            free_redirs_copy(expanded_redirs, expanded_redir_count);
             free_argv_list(expanded_argv, expanded_argc);
             return 0;
         }
@@ -2481,9 +2944,10 @@ static int execute_single_command(
     }
 
     init_fd_snapshot(&snap);
-    if (!apply_redirections(L, cmd, &snap, redir_err, sizeof(redir_err))) {
+    if (!apply_redirections(L, &effective, &snap, redir_err, sizeof(redir_err))) {
         fprintf(stderr, "Redirection error: %s\n", redir_err);
         restore_redirections(&snap);
+        free_redirs_copy(expanded_redirs, expanded_redir_count);
         free_argv_list(expanded_argv, expanded_argc);
         return 0;
     }
@@ -2500,6 +2964,7 @@ static int execute_single_command(
             lua_pop(L, 1);
         }
         restore_redirections(&snap);
+        free_redirs_copy(expanded_redirs, expanded_redir_count);
         free_argv_list(expanded_argv, expanded_argc);
         return 1;
     } else {
@@ -2523,6 +2988,7 @@ static int execute_single_command(
             lua_pop(L, 1);
         }
         restore_redirections(&snap);
+        free_redirs_copy(expanded_redirs, expanded_redir_count);
         free_argv_list(expanded_argv, expanded_argc);
         return 1;
     }
@@ -2594,8 +3060,11 @@ static int execute_pipeline(lua_State *L, const PipelineNode *pipeline) {
             }
 
             build_lua_fallback_chunk(&pipeline->commands[i], fallback_chunk, sizeof(fallback_chunk));
-            execute_single_command(L, &pipeline->commands[i], fallback_chunk, 1);
-            _exit(0);
+            {
+                int ok = execute_single_command(L, &pipeline->commands[i], fallback_chunk, 1);
+                lua_close(L);
+                exit(ok ? 0 : 1);
+            }
         }
         pids[i] = pid;
     }
@@ -2627,6 +3096,120 @@ static int execute_pipeline(lua_State *L, const PipelineNode *pipeline) {
     return success;
 }
 
+static int is_parent_builtin_name(const char *name) {
+    const char *parent_builtins[] = {
+        "cd",
+        "source",
+        "setprompt",
+        "alias",
+        "history",
+        "lunabuffer",
+        "tui",
+        "jobs",
+        "fg",
+        "bg",
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof(parent_builtins) / sizeof(parent_builtins[0])); i++) {
+        if (strcmp(name, parent_builtins[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int strip_background_suffix(const char *line, char **out_line, int *is_background) {
+    size_t len;
+    char *copy;
+    size_t end;
+    *is_background = 0;
+    *out_line = NULL;
+
+    if (!line) {
+        return 0;
+    }
+
+    len = strlen(line);
+    copy = dup_cstr(line);
+    if (!copy) {
+        return 0;
+    }
+
+    end = len;
+    while (end > 0 && isspace((unsigned char)copy[end - 1])) {
+        end--;
+    }
+    if (end > 0 && copy[end - 1] == '&') {
+        *is_background = 1;
+        end--;
+        while (end > 0 && isspace((unsigned char)copy[end - 1])) {
+            end--;
+        }
+    }
+    copy[end] = '\0';
+    *out_line = copy;
+    return 1;
+}
+
+static int run_job_command(lua_State *L, const CommandAst *ast, const char *line_for_job, int background, int *status_out) {
+    pid_t pid;
+    int status = 0;
+    int stopped = 0;
+    int jid;
+
+    *status_out = 0;
+    pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "Job launch error: %s\n", strerror(errno));
+        *status_out = 1;
+        return 0;
+    }
+
+    if (pid == 0) {
+        setpgid(0, 0);
+        reset_child_signals();
+        if (ast->pipeline.command_count > 1) {
+            int ok = execute_pipeline(L, &ast->pipeline);
+            lua_close(L);
+            exit(ok ? 0 : 1);
+        } else {
+            {
+                int ok = execute_single_command(L, &ast->pipeline.commands[0], line_for_job, 0);
+                lua_close(L);
+                exit(ok ? 0 : 1);
+            }
+        }
+    }
+
+    setpgid(pid, pid);
+
+    if (background) {
+        jid = add_job(pid, line_for_job, JOB_RUNNING);
+        if (jid > 0) {
+            printf("[%d] %d\n", jid, (int)pid);
+        }
+        *status_out = 0;
+        return 1;
+    }
+
+    if (!wait_foreground_job(pid, &stopped, &status)) {
+        fprintf(stderr, "Job wait error: %s\n", strerror(errno));
+        *status_out = 1;
+        return 0;
+    }
+
+    if (stopped) {
+        jid = add_job(pid, line_for_job, JOB_STOPPED);
+        if (jid > 0) {
+            printf("\n[%d] Stopped %s\n", jid, line_for_job ? line_for_job : "");
+        }
+        *status_out = 148;
+    } else {
+        *status_out = status;
+    }
+    return 1;
+}
+
 int main() {
     lua_State *L;
     int done = 0;
@@ -2640,6 +3223,12 @@ int main() {
     L = luaL_newstate();
     luaL_openlibs(L);
     using_history();
+    g_shell_pgid = getpgrp();
+    signal(SIGINT, SIG_IGN);
+    signal(SIGQUIT, SIG_IGN);
+    signal(SIGTSTP, SIG_IGN);
+    signal(SIGTTIN, SIG_IGN);
+    signal(SIGTTOU, SIG_IGN);
     lua_pushcfunction(L, lua_listdir);
     lua_setglobal(L, "_LISTDIR");
     lua_pushcfunction(L, lua_isdir);
@@ -2682,10 +3271,18 @@ int main() {
     lua_setglobal(L, "_HISTORY_WRITE");
     lua_pushcfunction(L, lua_history_path);
     lua_setglobal(L, "_HISTORY_PATH");
+    lua_pushcfunction(L, lua_jobs_list);
+    lua_setglobal(L, "_JOBS_LIST");
+    lua_pushcfunction(L, lua_job_fg);
+    lua_setglobal(L, "_JOB_FG");
+    lua_pushcfunction(L, lua_job_bg);
+    lua_setglobal(L, "_JOB_BG");
     lua_pushcfunction(L, lua_alias_fn);
     lua_setglobal(L, "alias");
     lua_newtable(L);
     lua_setglobal(L, "ALIASES");
+    lua_newtable(L);
+    lua_setglobal(L, "UTIL");
 
     // Initialize shell working directory from process cwd.
     if (!init_luna_buffers()) {
@@ -2710,6 +3307,8 @@ int main() {
         CommandNode *cmd;
         const char *parse_line;
         const char *history_line;
+        char *run_line = NULL;
+        int background = 0;
         ParseSyntaxMode parse_mode = SYNTAX_LUNA;
         int exec_ok = 1;
         char history_err[MAX_PARSE_ERR];
@@ -2763,8 +3362,19 @@ int main() {
             last_mode = "lua";
         }
 
+        if (!strip_background_suffix(parse_line, &run_line, &background)) {
+            fprintf(stderr, "Parse error: out of memory\n");
+            free(history_expanded);
+            free(line);
+            continue;
+        }
+        parse_line = run_line;
+
+        poll_jobs();
+
         if (!parse_to_ast(parse_line, parse_mode, &ast, parse_err, sizeof(parse_err))) {
             fprintf(stderr, "Parse error: %s\n", parse_err);
+            free(run_line);
             free(history_expanded);
             free(line);
             continue;
@@ -2772,6 +3382,7 @@ int main() {
 
         if (ast.pipeline.command_count == 0) {
             free_command_ast(&ast);
+            free(run_line);
             free(history_expanded);
             free(line);
             continue;
@@ -2782,18 +3393,45 @@ int main() {
         if ((strcmp("quit", cmd->argv[0]) == 0) || (strcmp("exit", cmd->argv[0]) == 0)) {
             done = 1;
             free_command_ast(&ast);
+            free(run_line);
             free(history_expanded);
             free(line);
             continue;
         }
 
-        if (ast.pipeline.command_count > 1) {
-            exec_ok = execute_pipeline(L, &ast.pipeline);
+        if (!background && ast.pipeline.command_count == 1) {
+            int run_in_parent = 0;
+            char builtin_path[PATH_MAX];
+            int is_user_builtin = 0;
+            if (is_parent_builtin_name(cmd->argv[0])) {
+                run_in_parent = 1;
+            } else if (!resolve_builtin_path_for_name(
+                           cmd->argv[0], builtin_path, sizeof(builtin_path), &is_user_builtin)) {
+                /* Keep Lua-first stateful semantics for fallback Lua chunks. */
+                run_in_parent = 1;
+            }
+            if (run_in_parent) {
+                exec_ok = execute_single_command(L, cmd, parse_line, 0);
+            } else {
+                int child_status = 0;
+                exec_ok = run_job_command(L, &ast, parse_line, background, &child_status);
+                if (exec_ok) {
+                    exec_ok = (child_status == 0);
+                }
+            }
         } else {
-            exec_ok = execute_single_command(L, cmd, parse_line, 0);
+            int child_status = 0;
+            exec_ok = run_job_command(L, &ast, parse_line, background, &child_status);
+            if (exec_ok) {
+                if (background) {
+                    child_status = 0;
+                }
+                exec_ok = (child_status == 0);
+            }
         }
         last_status = exec_ok ? 0 : 1;
         free_command_ast(&ast);
+        free(run_line);
         free(history_expanded);
         free(line);
     }

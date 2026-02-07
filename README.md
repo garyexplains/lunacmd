@@ -44,6 +44,26 @@ cat out.txt
 source hello.lua
 ```
 
+## Feature Quick Examples
+
+```text
+# persistent history + recall
+history
+!!
+!12
+!-2
+
+# special buffers
+echo hello :> :@mem
+cat :< :@mem
+lunabuffer status
+
+# TUI mode
+tui on
+tui status
+tui off
+```
+
 ## Documentation
 
 - `docs/getting-started.md`

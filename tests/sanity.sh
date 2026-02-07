@@ -40,6 +40,16 @@ assert_line_matches() {
     pass "$name"
 }
 
+assert_not_line_matches() {
+    name="$1"
+    haystack="$2"
+    regex="$3"
+    if printf "%s\n" "$haystack" | grep -E "$regex" >/dev/null 2>&1; then
+        fail "$name"
+    fi
+    pass "$name"
+}
+
 assert_builtin_help() {
     cmd="$1"
 
@@ -96,6 +106,15 @@ assert_contains "head expands glob arguments second file header" "$out" "g2.txt"
 out="$(printf 'cd %s\nexec ls *.txt\nexit\n' "$tmpglob" | ./lunacmd 2>&1)"
 assert_contains "exec expands glob arguments" "$out" "g1.txt"
 assert_contains "exec expands glob arguments second match" "$out" "g2.txt"
+
+tmpsubst="$(mktemp -d)"
+trap 'rm -rf "$tmphome_tilde" "$tmpglob" "$tmpsubst"' EXIT INT TERM
+printf 'sub_marker\n' > "$tmpsubst/marker.txt"
+out="$(printf 'cd %s\nls `G_CWD`\nexit\n' "$tmpsubst" | ./lunacmd 2>&1)"
+assert_contains "backtick substitution works in builtin args" "$out" "marker.txt"
+
+out="$(printf 'echo subok :> `\"%s/sub.txt\"`\ncat %s/sub.txt\nexit\n' "$tmpsubst" "$tmpsubst" | ./lunacmd 2>&1)"
+assert_contains "backtick substitution works in redirection targets" "$out" "subok"
 
 tmpdir_ls="$(mktemp -d)"
 trap 'rm -rf "$tmpdir_ls"' EXIT INT TERM
@@ -325,6 +344,11 @@ assert_contains "sleep supports summed durations with suffixes" "$out" "slept"
 out="$(printf 'sleep nope\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "sleep reports invalid interval" "$out" "sleep: invalid time interval 'nope'"
 
+out="$(printf 'sleep 0.2s &\njobs\nfg %%1\necho fg_done\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "background job launch prints job id" "$out" "[1]"
+assert_contains "jobs lists running background job" "$out" "running sleep 0.2s"
+assert_contains "fg returns control after job completion" "$out" "fg_done"
+
 tmpdir9="$(mktemp -d)"
 trap 'rm -rf "$tmpdir" "$tmpdir2" "$tmpdir3" "$tmpdir4" "$tmpdir5" "$tmpdir6" "$tmpdir7" "$tmpdir8" "$tmpdir9"' EXIT INT TERM
 printf 'one two\nthree\n\n' > "$tmpdir9/wc.txt"
@@ -470,7 +494,7 @@ out="$(printf 'echo ABC :| hexdump -x\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "hexdump reads stdin in pipeline" "$out" "41 42 43 0a"
 
 for cmd in \
-    alias cat cd cksum clear cp date echo exec fold head hexdump history inca ls lunabuffer mkdir more mv prompt pwd rm rmdir setprompt sleep source tui type wc which
+    alias bg cat cd cksum clear cp date echo exec fg fold head hexdump history inca jobs ls lunabuffer mkdir more mv prompt pwd rm rmdir setprompt sleep source tail tui type wc which
 do
     assert_builtin_help "$cmd"
 done
@@ -505,7 +529,7 @@ printf 'ABCDEFGH' > "$tmpdir14/b.bin"
 
 out="$(printf 'head %s/a.txt\nexit\n' "$tmpdir14" | ./lunacmd 2>&1)"
 assert_contains "head default prints first 10 lines" "$out" "l10"
-assert_not_contains "head default does not print line 11" "$out" "l11"
+assert_not_line_matches "head default does not print line 11" "$out" "^l11$"
 
 out="$(printf 'head -n 3 %s/a.txt\nexit\n' "$tmpdir14" | ./lunacmd 2>&1)"
 assert_contains "head -n prints first N lines" "$out" "l3"
@@ -525,5 +549,38 @@ assert_contains "head -v forces headers" "$out" "==> $tmpdir14/a.txt <=="
 
 out="$(printf 'echo stdin_line :| head -n 1\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "head reads stdin in pipeline" "$out" "stdin_line"
+
+tmpdir_tail="$(mktemp -d)"
+trap 'rm -rf "$tmpdir" "$tmpdir2" "$tmpdir3" "$tmpdir4" "$tmpdir5" "$tmpdir6" "$tmpdir7" "$tmpdir8" "$tmpdir9" "$tmpdir10" "$tmpdir11" "$tmpdir12" "$tmpdir13" "$tmpdir14" "$tmpdir15" "$tmpdir16" "$tmpdir_ls" "$tmphome_tilde" "$tmpglob" "$tmpsubst" "$tmpdir_rmdir" "$tmpdir_buf" "$tmpdir_tail"' EXIT INT TERM
+cat > "$tmpdir_tail/t1.txt" <<'EOF'
+t1
+t2
+t3
+t4
+EOF
+printf 'ABCDEFGH' > "$tmpdir_tail/t2.bin"
+
+out="$(printf 'tail -n 2 %s/t1.txt\nexit\n' "$tmpdir_tail" | ./lunacmd 2>&1)"
+assert_contains "tail -n prints last lines" "$out" "t3"
+assert_contains "tail -n prints last lines second" "$out" "t4"
+
+out="$(printf 'tail -n +3 %s/t1.txt\nexit\n' "$tmpdir_tail" | ./lunacmd 2>&1)"
+assert_contains "tail -n +N starts from Nth line" "$out" "t3"
+assert_contains "tail -n +N includes following lines" "$out" "t4"
+
+out="$(printf 'tail -c 3 %s/t2.bin\nexit\n' "$tmpdir_tail" | ./lunacmd 2>&1)"
+assert_contains "tail -c prints last bytes" "$out" "FGH"
+
+out="$(printf 'tail %s/t1.txt %s/t1.txt\nexit\n' "$tmpdir_tail" "$tmpdir_tail" | ./lunacmd 2>&1)"
+assert_contains "tail prints headers for multiple files by default" "$out" "==> $tmpdir_tail/t1.txt <=="
+
+out="$(printf 'tail -q %s/t1.txt %s/t1.txt\nexit\n' "$tmpdir_tail" "$tmpdir_tail" | ./lunacmd 2>&1)"
+assert_not_contains "tail -q suppresses headers" "$out" "==> $tmpdir_tail/t1.txt <=="
+
+out="$(printf 'tail -v %s/t1.txt\nexit\n' "$tmpdir_tail" | ./lunacmd 2>&1)"
+assert_contains "tail -v forces headers" "$out" "==> $tmpdir_tail/t1.txt <=="
+
+out="$(printf 'echo tailstdin_line :| tail -n 1\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "tail reads stdin in pipeline" "$out" "tailstdin_line"
 
 printf "All sanity checks passed.\n"

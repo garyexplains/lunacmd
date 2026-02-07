@@ -2,6 +2,127 @@
 
 Useful Lua-first one-liners you can run directly in `lunacmd`.
 
+Tip: put helpers in `~/.lunacmd.lua` under the global `UTIL` table:
+
+```lua
+function UTIL.trim(s)
+  return (tostring(s):gsub("^%s+",""):gsub("%s+$",""))
+end
+```
+
+## UTIL Starter Pack (Copy to `~/.lunacmd.lua`)
+
+```lua
+UTIL = UTIL or {}
+
+function UTIL.basename(path, suffix)
+  local p = tostring(path or ""):gsub("/+$", "")
+  local name = p:match("([^/]+)$") or p
+  if suffix and suffix ~= "" and name:sub(-#suffix) == suffix then
+    name = name:sub(1, #name - #suffix)
+  end
+  return name
+end
+
+function UTIL.dirname(path)
+  local p = tostring(path or ""):gsub("/+$", "")
+  if p == "" then return "." end
+  if p == "/" then return "/" end
+  local dir = p:match("^(.*)/[^/]+$")
+  if not dir or dir == "" then
+    return p:sub(1,1) == "/" and "/" or "."
+  end
+  return dir
+end
+
+function UTIL.realpath(path)
+  local p = tostring(path or "")
+  if type(_RESOLVE_PATH) == "function" then
+    local r = _RESOLVE_PATH(p)
+    if r then p = r end
+  end
+  local absolute = p:sub(1,1) == "/"
+  local parts = {}
+  for part in p:gmatch("[^/]+") do
+    if part == "." or part == "" then
+      -- skip
+    elseif part == ".." then
+      if #parts > 0 then parts[#parts] = nil end
+    else
+      parts[#parts + 1] = part
+    end
+  end
+  local out = table.concat(parts, "/")
+  if absolute then out = "/" .. out end
+  if out == "" then return absolute and "/" or "." end
+  return out
+end
+
+function UTIL.split(s, sep)
+  local out = {}
+  local str = tostring(s or "")
+  if not sep or sep == "" then
+    for w in str:gmatch("%S+") do out[#out + 1] = w end
+    return out
+  end
+  local patt = "([^" .. sep:gsub("(%W)", "%%%1") .. "]*)"
+  local i = 1
+  for part in (str .. sep):gmatch(patt .. sep:gsub("(%W)", "%%%1")) do
+    out[i] = part
+    i = i + 1
+  end
+  return out
+end
+
+function UTIL.join(tbl, sep)
+  return table.concat(tbl or {}, sep or " ")
+end
+
+function UTIL.sort(tbl, cmp)
+  local out = { table.unpack(tbl or {}) }
+  table.sort(out, cmp)
+  return out
+end
+
+function UTIL.uniq(tbl)
+  local out, seen = {}, {}
+  for _, v in ipairs(tbl or {}) do
+    if not seen[v] then
+      seen[v] = true
+      out[#out + 1] = v
+    end
+  end
+  return out
+end
+
+function UTIL.readfile(path)
+  local p = tostring(path or "")
+  if type(_RESOLVE_PATH) == "function" then
+    local r = _RESOLVE_PATH(p)
+    if r then p = r end
+  end
+  local f = io.open(p, "rb")
+  if not f then return nil, "open failed: " .. p end
+  local data = f:read("*a")
+  f:close()
+  return data or ""
+end
+
+function UTIL.writefile(path, data)
+  local p = tostring(path or "")
+  if type(_RESOLVE_PATH) == "function" then
+    local r = _RESOLVE_PATH(p)
+    if r then p = r end
+  end
+  local f = io.open(p, "wb")
+  if not f then return nil, "open failed: " .. p end
+  local ok = f:write(tostring(data or ""))
+  f:close()
+  if not ok then return nil, "write failed: " .. p end
+  return true
+end
+```
+
 ## Paths and Files
 
 1. Parent directory of current path:

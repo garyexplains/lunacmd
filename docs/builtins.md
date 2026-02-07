@@ -37,6 +37,12 @@ This lists builtins currently present in `builtin/`.
   - `history -c` clears history.
   - `history -w` writes history to disk.
   - `history -r` reloads history from disk.
+- `jobs`
+  - Lists background/stopped jobs.
+- `fg %JOB`
+  - Brings job to foreground.
+- `bg %JOB`
+  - Resumes job in background.
 - `tui on|off|status`
   - Enables/disables the built-in 3-pane terminal UI layout.
 
@@ -89,6 +95,16 @@ This lists builtins currently present in `builtin/`.
   - Prints first 10 lines by default.
   - `-n N[kbm]`: first N lines.
   - `-c N[kbm]`: first N bytes.
+  - `-q`: never print file headers.
+  - `-v`: always print file headers.
+  - Supports files and stdin (`-` or no file args).
+- `tail [FILE]...`
+  - Prints last 10 lines by default.
+  - `-n N[kbm]`: last N lines.
+  - `-c N[kbm]`: last N bytes.
+  - `-n +N` / `-c +N`: start from the Nth item from the beginning.
+  - `-f`: follow file growth.
+  - `-s SECONDS`: poll interval for `-f`.
   - `-q`: never print file headers.
   - `-v`: always print file headers.
   - Supports files and stdin (`-` or no file args).
