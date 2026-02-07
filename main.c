@@ -2215,6 +2215,8 @@ static int is_tui_mode_enabled(lua_State *L) {
     return enabled;
 }
 
+static int g_tui_initialized = 0;
+
 static void render_tui(lua_State *L) {
     struct winsize ws;
     int rows = 24;
@@ -2275,7 +2277,10 @@ static void render_tui(lua_State *L) {
         top_h = rows - 3;
     }
 
-    printf("\033[2J\033[H");
+    if (!g_tui_initialized) {
+        printf("\033[2J\033[H");
+        g_tui_initialized = 1;
+    }
 
     for (i = 1; i <= rows; i++) {
         tui_move_cursor(i, left_w + 1);
@@ -2284,6 +2289,15 @@ static void render_tui(lua_State *L) {
     for (i = 1; i <= left_w; i++) {
         tui_move_cursor(top_h + 1, i);
         putchar('-');
+    }
+
+    for (i = 1; i <= top_h; i++) {
+        tui_move_cursor(i, 1);
+        printf("%-*s", left_w, "");
+    }
+    for (i = 1; i <= rows; i++) {
+        tui_move_cursor(i, left_w + 2);
+        printf("%-*s", right_w - 1, "");
     }
 
     tui_print_clipped(1, 2, left_w - 3, "FILES");
@@ -2394,10 +2408,7 @@ static void render_tui(lua_State *L) {
         }
     }
 
-    cmd_row = top_h + 3;
-    if (cmd_row > rows) {
-        cmd_row = rows;
-    }
+    cmd_row = rows;
     tui_move_cursor(cmd_row, 1);
     fflush(stdout);
 }
@@ -2706,6 +2717,8 @@ int main() {
 
         if (is_tui_mode_enabled(L)) {
             render_tui(L);
+        } else {
+            g_tui_initialized = 0;
         }
         update_prompt_context(L, last_status, last_mode);
         char *line = read_repl_input(L, &warned_prompt, &warned_prompt_cont);

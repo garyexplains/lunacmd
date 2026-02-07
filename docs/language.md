@@ -74,6 +74,22 @@ Event recall shortcuts:
 - `!N` command number `N`
 - `!-N` command `N` entries back
 
+## TUI Mode
+
+Use the `tui` builtin to toggle the built-in full-screen terminal UI:
+
+- `tui on`
+- `tui off`
+- `tui status`
+
+Current layout:
+
+- Main area (about 80% width):
+  - top: files in current working directory
+  - bottom: command input area
+- Side area (about 20% width):
+  - command history
+
 ## User Builtins
 
 `lunacmd` also searches for user-defined builtins in:

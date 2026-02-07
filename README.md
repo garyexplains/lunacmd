@@ -57,3 +57,5 @@ source hello.lua
 - Redirection is implemented (`:>`, `:>>`, `2:>`, `2:>>`, `2:>&1`, `:<`).
 - Pipelines are implemented with `:|` and work across builtins and `exec`.
 - Special redirection buffers are available: `:@mem` and `:@file` (managed by `lunabuffer`).
+- Persistent history is implemented (`history`, `!!`, `!N`, `!-N`).
+- Built-in TUI mode is available via `tui on|off|status`.

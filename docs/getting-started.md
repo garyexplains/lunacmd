@@ -67,6 +67,10 @@ source hello.lua
   - `:>`, `:>>`, `:<`, `:|`
 - Special buffer targets are available for redirection/input:
   - `:@mem` and `:@file`
+- History is persisted across sessions:
+  - `history`, `!!`, `!N`, `!-N`
+- Built-in TUI mode:
+  - `tui on`, `tui off`, `tui status`
 - Use `:!` prefix to opt into legacy shell symbols (`>`, `<`, `|`, etc.).
 - Prompt customization (`PROMPT`, `PROMPT_CONT`) is documented in `docs/language.md`.
 - Lua one-liners and quick tricks are in `docs/lua-cheatsheet.md`.
