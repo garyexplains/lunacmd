@@ -67,9 +67,11 @@ tui off
 ## Documentation
 
 - `docs/getting-started.md`
+- `docs/user-guide.md`
 - `docs/language.md`
 - `docs/builtins.md`
 - `docs/development.md`
+- `docs/architecture.md`
 - `docs/lua-cheatsheet.md`
 
 ## Current Status
