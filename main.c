@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -88,10 +89,18 @@ typedef struct CommandAst {
     PipelineNode pipeline;
 } CommandAst;
 
+typedef struct LunaBufferState {
+    char mem_path[PATH_MAX];
+    char file_path[PATH_MAX];
+    size_t mem_max;
+    int initialized;
+} LunaBufferState;
+
 static int next_token(
     const char **input, ParseSyntaxMode mode, Token *out, char *err, size_t err_size);
 static char *dup_cstr(const char *s);
 static void free_token(Token *token);
+static LunaBufferState g_luna_buffer = {{0}, {0}, 16 * 1024, 0};
 
 static int starts_with(const char *s, const char *prefix) {
     return strncmp(s, prefix, strlen(prefix)) == 0;
@@ -100,6 +109,143 @@ static int starts_with(const char *s, const char *prefix) {
 static int is_env_enabled(const char *name) {
     const char *v = getenv(name);
     return v && *v;
+}
+
+static int ensure_parent_dir(const char *path) {
+    struct stat st;
+
+    if (stat(path, &st) == 0) {
+        return S_ISDIR(st.st_mode) ? 1 : 0;
+    }
+    if (mkdir(path, 0700) == 0) {
+        return 1;
+    }
+    if (errno == EEXIST) {
+        return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+    }
+    return 0;
+}
+
+static int file_size_bytes(const char *path, size_t *out) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return 0;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        return 0;
+    }
+    if (out) {
+        *out = (size_t)st.st_size;
+    }
+    return 1;
+}
+
+static int truncate_file_to(const char *path, size_t max_size) {
+    int fd = open(path, O_RDWR | O_CREAT, 0600);
+    if (fd < 0) {
+        return 0;
+    }
+    if (ftruncate(fd, (off_t)max_size) != 0) {
+        close(fd);
+        return 0;
+    }
+    close(fd);
+    return 1;
+}
+
+static int clamp_memory_buffer(void) {
+    size_t sz = 0;
+    if (!file_size_bytes(g_luna_buffer.mem_path, &sz)) {
+        int fd = open(g_luna_buffer.mem_path, O_WRONLY | O_CREAT, 0600);
+        if (fd >= 0) {
+            close(fd);
+        }
+        return 1;
+    }
+    if (sz <= g_luna_buffer.mem_max) {
+        return 1;
+    }
+    return truncate_file_to(g_luna_buffer.mem_path, g_luna_buffer.mem_max);
+}
+
+static int init_luna_buffers(void) {
+    const char *home = getenv("HOME");
+    int fd;
+
+    if (g_luna_buffer.initialized) {
+        return 1;
+    }
+
+    if (snprintf(
+            g_luna_buffer.mem_path, sizeof(g_luna_buffer.mem_path), "/tmp/lunacmd-mem-%ld.buf", (long)getpid())
+        >= (int)sizeof(g_luna_buffer.mem_path)) {
+        return 0;
+    }
+    fd = open(g_luna_buffer.mem_path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        return 0;
+    }
+    close(fd);
+
+    if (home && *home) {
+        char dir_path[PATH_MAX];
+        if (snprintf(dir_path, sizeof(dir_path), "%s/.lunacmd", home) < (int)sizeof(dir_path)
+            && ensure_parent_dir(dir_path)
+            && snprintf(g_luna_buffer.file_path, sizeof(g_luna_buffer.file_path), "%s/buffer", dir_path)
+                   < (int)sizeof(g_luna_buffer.file_path)) {
+            fd = open(g_luna_buffer.file_path, O_RDWR | O_CREAT, 0600);
+            if (fd >= 0) {
+                close(fd);
+                g_luna_buffer.initialized = 1;
+                return 1;
+            }
+        }
+    }
+
+    if (snprintf(
+            g_luna_buffer.file_path, sizeof(g_luna_buffer.file_path), "/tmp/lunacmd-file-%ld.buf", (long)getuid())
+        >= (int)sizeof(g_luna_buffer.file_path)) {
+        return 0;
+    }
+    fd = open(g_luna_buffer.file_path, O_RDWR | O_CREAT, 0600);
+    if (fd < 0) {
+        return 0;
+    }
+    close(fd);
+
+    g_luna_buffer.initialized = 1;
+    return 1;
+}
+
+static int is_buffer_target_word(const char *target, const char **path_out, int *is_mem_out) {
+    if (!target) {
+        return 0;
+    }
+    if (strcmp(target, ":@mem") == 0) {
+        if (!init_luna_buffers()) {
+            return 0;
+        }
+        if (path_out) {
+            *path_out = g_luna_buffer.mem_path;
+        }
+        if (is_mem_out) {
+            *is_mem_out = 1;
+        }
+        return 1;
+    }
+    if (strcmp(target, ":@file") == 0) {
+        if (!init_luna_buffers()) {
+            return 0;
+        }
+        if (path_out) {
+            *path_out = g_luna_buffer.file_path;
+        }
+        if (is_mem_out) {
+            *is_mem_out = 0;
+        }
+        return 1;
+    }
+    return 0;
 }
 
 static int path_is_readable_file(const char *path) {
@@ -753,6 +899,196 @@ static int lua_isatty(lua_State *L) {
     return 1;
 }
 
+static int copy_file_contents(const char *src, const char *dst) {
+    int in_fd = -1;
+    int out_fd = -1;
+    char buf[8192];
+
+    in_fd = open(src, O_RDONLY);
+    if (in_fd < 0) {
+        return 0;
+    }
+    out_fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out_fd < 0) {
+        close(in_fd);
+        return 0;
+    }
+
+    while (1) {
+        ssize_t nread = read(in_fd, buf, sizeof(buf));
+        if (nread < 0) {
+            close(in_fd);
+            close(out_fd);
+            return 0;
+        }
+        if (nread == 0) {
+            break;
+        }
+        {
+            ssize_t written = 0;
+            while (written < nread) {
+                ssize_t nw = write(out_fd, buf + written, (size_t)(nread - written));
+                if (nw <= 0) {
+                    close(in_fd);
+                    close(out_fd);
+                    return 0;
+                }
+                written += nw;
+            }
+        }
+    }
+
+    close(in_fd);
+    close(out_fd);
+    return 1;
+}
+
+static int lua_lunabuffer_status(lua_State *L) {
+    size_t mem_size = 0;
+    size_t file_size = 0;
+
+    if (!init_luna_buffers()) {
+        lua_pushnil(L);
+        lua_pushstring(L, "failed to initialize buffers");
+        return 2;
+    }
+
+    file_size_bytes(g_luna_buffer.mem_path, &mem_size);
+    file_size_bytes(g_luna_buffer.file_path, &file_size);
+
+    lua_newtable(L);
+
+    lua_pushstring(L, "mem");
+    lua_newtable(L);
+    lua_pushstring(L, "path");
+    lua_pushstring(L, g_luna_buffer.mem_path);
+    lua_settable(L, -3);
+    lua_pushstring(L, "size");
+    lua_pushinteger(L, (lua_Integer)mem_size);
+    lua_settable(L, -3);
+    lua_pushstring(L, "max");
+    lua_pushinteger(L, (lua_Integer)g_luna_buffer.mem_max);
+    lua_settable(L, -3);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "file");
+    lua_newtable(L);
+    lua_pushstring(L, "path");
+    lua_pushstring(L, g_luna_buffer.file_path);
+    lua_settable(L, -3);
+    lua_pushstring(L, "size");
+    lua_pushinteger(L, (lua_Integer)file_size);
+    lua_settable(L, -3);
+    lua_settable(L, -3);
+
+    return 1;
+}
+
+static int lua_lunabuffer_set_size(lua_State *L) {
+    size_t n = (size_t)luaL_checkinteger(L, 1);
+    if (!init_luna_buffers()) {
+        lua_pushnil(L);
+        lua_pushstring(L, "failed to initialize buffers");
+        return 2;
+    }
+    if (n == 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, "size must be greater than zero");
+        return 2;
+    }
+    g_luna_buffer.mem_max = n;
+    if (!clamp_memory_buffer()) {
+        lua_pushnil(L);
+        lua_pushstring(L, "failed to clamp memory buffer");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int lua_lunabuffer_clear(lua_State *L) {
+    const char *kind = luaL_optstring(L, 1, "all");
+    int do_mem = 0;
+    int do_file = 0;
+    int fd;
+
+    if (!init_luna_buffers()) {
+        lua_pushnil(L);
+        lua_pushstring(L, "failed to initialize buffers");
+        return 2;
+    }
+
+    if (strcmp(kind, "mem") == 0) {
+        do_mem = 1;
+    } else if (strcmp(kind, "file") == 0) {
+        do_file = 1;
+    } else if (strcmp(kind, "all") == 0) {
+        do_mem = 1;
+        do_file = 1;
+    } else {
+        lua_pushnil(L);
+        lua_pushstring(L, "kind must be mem, file, or all");
+        return 2;
+    }
+
+    if (do_mem) {
+        fd = open(g_luna_buffer.mem_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0) {
+            lua_pushnil(L);
+            lua_pushstring(L, strerror(errno));
+            return 2;
+        }
+        close(fd);
+    }
+    if (do_file) {
+        fd = open(g_luna_buffer.file_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0) {
+            lua_pushnil(L);
+            lua_pushstring(L, strerror(errno));
+            return 2;
+        }
+        close(fd);
+    }
+
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int lua_lunabuffer_save(lua_State *L) {
+    const char *kind = luaL_checkstring(L, 1);
+    const char *dest = luaL_checkstring(L, 2);
+    const char *src = NULL;
+    int is_mem = 0;
+
+    if (!init_luna_buffers()) {
+        lua_pushnil(L);
+        lua_pushstring(L, "failed to initialize buffers");
+        return 2;
+    }
+
+    if (strcmp(kind, "mem") == 0) {
+        src = g_luna_buffer.mem_path;
+        is_mem = 1;
+    } else if (strcmp(kind, "file") == 0) {
+        src = g_luna_buffer.file_path;
+    } else {
+        lua_pushnil(L);
+        lua_pushstring(L, "kind must be mem or file");
+        return 2;
+    }
+
+    if (!copy_file_contents(src, dest)) {
+        lua_pushnil(L);
+        lua_pushstring(L, strerror(errno));
+        return 2;
+    }
+    if (is_mem) {
+        clamp_memory_buffer();
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 static void free_token(Token *token) {
     if (token->text) {
         free(token->text);
@@ -1304,12 +1640,14 @@ typedef struct FdSnapshot {
     int saved_stdin;
     int saved_stdout;
     int saved_stderr;
+    int mem_buffer_written;
 } FdSnapshot;
 
 static void init_fd_snapshot(FdSnapshot *snap) {
     snap->saved_stdin = -1;
     snap->saved_stdout = -1;
     snap->saved_stderr = -1;
+    snap->mem_buffer_written = 0;
 }
 
 static int ensure_saved_fd(int target_fd, int *slot) {
@@ -1349,8 +1687,10 @@ static int apply_redirections(
         int fd = -1;
         int flags = 0;
         int target_fd = -1;
+        int is_mem_target = 0;
         char path[PATH_MAX];
         Redirection *r = &cmd->redirs[i];
+        const char *buffer_path = NULL;
 
         if (r->type == REDIR_ERR_TO_OUT) {
             if (!ensure_saved_fd(STDERR_FILENO, &snap->saved_stderr)) {
@@ -1364,9 +1704,20 @@ static int apply_redirections(
             continue;
         }
 
-        if (!resolve_redirection_path(L, r->target, path, sizeof(path))) {
-            snprintf(err, err_size, "redirection path too long");
-            return 0;
+        if (r->target && (strcmp(r->target, ":@mem") == 0 || strcmp(r->target, ":@file") == 0)) {
+            if (!is_buffer_target_word(r->target, &buffer_path, &is_mem_target)) {
+                snprintf(err, err_size, "failed to resolve buffer target '%s'", r->target);
+                return 0;
+            }
+            if (snprintf(path, sizeof(path), "%s", buffer_path) >= (int)sizeof(path)) {
+                snprintf(err, err_size, "buffer path too long");
+                return 0;
+            }
+        } else {
+            if (!resolve_redirection_path(L, r->target, path, sizeof(path))) {
+                snprintf(err, err_size, "redirection path too long");
+                return 0;
+            }
         }
 
         switch (r->type) {
@@ -1427,6 +1778,11 @@ static int apply_redirections(
             return 0;
         }
         close(fd);
+
+        if (is_mem_target && (r->type == REDIR_OUT || r->type == REDIR_OUT_APPEND || r->type == REDIR_ERR_OUT
+                              || r->type == REDIR_ERR_OUT_APPEND)) {
+            snap->mem_buffer_written = 1;
+        }
     }
     return 1;
 }
@@ -1446,6 +1802,10 @@ static void restore_redirections(FdSnapshot *snap) {
         dup2(snap->saved_stderr, STDERR_FILENO);
         close(snap->saved_stderr);
         snap->saved_stderr = -1;
+    }
+    if (snap->mem_buffer_written) {
+        clamp_memory_buffer();
+        snap->mem_buffer_written = 0;
     }
 }
 
@@ -1685,12 +2045,24 @@ int main() {
     lua_setglobal(L, "_GID_NAME");
     lua_pushcfunction(L, lua_isatty);
     lua_setglobal(L, "_ISATTY");
+    lua_pushcfunction(L, lua_lunabuffer_status);
+    lua_setglobal(L, "_LUNABUFFER_STATUS");
+    lua_pushcfunction(L, lua_lunabuffer_set_size);
+    lua_setglobal(L, "_LUNABUFFER_SET_SIZE");
+    lua_pushcfunction(L, lua_lunabuffer_clear);
+    lua_setglobal(L, "_LUNABUFFER_CLEAR");
+    lua_pushcfunction(L, lua_lunabuffer_save);
+    lua_setglobal(L, "_LUNABUFFER_SAVE");
     lua_pushcfunction(L, lua_alias_fn);
     lua_setglobal(L, "alias");
     lua_newtable(L);
     lua_setglobal(L, "ALIASES");
 
     // Initialize shell working directory from process cwd.
+    if (!init_luna_buffers()) {
+        fprintf(stderr, "Failed to initialize lunabuffer paths\n");
+    }
+
     if (getcwd(cwd, sizeof(cwd)) != NULL) {
         lua_pushstring(L, cwd);
     } else {

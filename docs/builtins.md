@@ -22,6 +22,12 @@ This lists builtins currently present in `builtin/`.
   - Sets `PROMPT` (or `PROMPT_CONT` with `--cont`) at runtime.
 - `prompt`
   - Prints current prompt configuration.
+- `lunabuffer`
+  - Manage special redirect buffers:
+    - `lunabuffer status`
+    - `lunabuffer size [N[K|M]]`
+    - `lunabuffer clear [mem|file|all]`
+    - `lunabuffer save <mem|file> FILE`
 - `which CMD...`
   - Prints resolved command path for each command (or `lua-fallback`).
 - `type CMD...`

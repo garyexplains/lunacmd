@@ -29,6 +29,23 @@ rm /tmp/missing 2:> /tmp/err.log
 rm /tmp/missing :> /tmp/both.log 2:>&1
 ```
 
+### Special Buffer Targets
+
+Two special redirection targets are built in:
+
+- `:@mem` (session memory buffer, default max `16K`)
+- `:@file` (`~/.lunacmd/buffer`)
+
+Examples:
+
+```text
+echo hello :> :@mem
+cat :< :@mem
+cat :< :@mem :| exec grep hello
+echo persist :> :@file
+cat :< :@file
+```
+
 ## Legacy Shell Symbols (Opt-In)
 
 Legacy symbols are available only when the line starts with `:!`:
@@ -204,5 +221,5 @@ PROMPT_CONT = "... "
 ## Current Execution Scope
 
 - Single-command execution is implemented.
-- Redirection is implemented for single commands.
-- Pipeline syntax is parsed, but pipeline execution is not yet implemented.
+- Redirection is implemented.
+- Pipeline execution is implemented.

@@ -315,6 +315,28 @@ out="$(printf 'echo abcdef :| fold -w 3\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "fold reads stdin in pipeline first chunk" "$out" "abc"
 assert_contains "fold reads stdin in pipeline second chunk" "$out" "def"
 
+out="$(printf 'lunabuffer clear all\necho mem_line :> :@mem\ncat :< :@mem\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "mem buffer captures stdout redirection" "$out" "mem_line"
+
+out="$(printf 'lunabuffer clear all\necho one :> :@mem\necho two :>> :@mem\ncat :< :@mem\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "mem buffer supports append redirection first line" "$out" "one"
+assert_contains "mem buffer supports append redirection second line" "$out" "two"
+
+out="$(printf 'rm /definitely_no_luna_file 2:> :@mem\ncat :< :@mem\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "mem buffer captures stderr redirection" "$out" "No such file or directory"
+
+out="$(printf 'lunabuffer clear mem\necho hello_buffer :> :@mem\nexec grep hello :< :@mem\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "mem buffer can feed stdin via :<" "$out" "hello_buffer"
+
+out="$(printf 'lunabuffer clear all\necho file_line :> :@file\ncat :< :@file\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "file buffer captures stdout redirection" "$out" "file_line"
+
+tmpdir_buf="$(mktemp -d)"
+trap 'rm -rf "$tmpdir" "$tmpdir2" "$tmpdir3" "$tmpdir4" "$tmpdir5" "$tmpdir6" "$tmpdir7" "$tmpdir8" "$tmpdir_rmdir" "$tmpdir_buf"' EXIT INT TERM
+out="$(printf 'lunabuffer clear mem\nlunabuffer size 10\nexec printf 123456789012345 :> :@mem\nwc -c :< :@mem\nlunabuffer save mem %s/mem.bin\nwc -c %s/mem.bin\nexit\n' "$tmpdir_buf" "$tmpdir_buf" | ./lunacmd 2>&1)"
+assert_contains "lunabuffer size applies truncation policy" "$out" "10 -"
+assert_contains "lunabuffer save writes memory buffer to file" "$out" "10 $tmpdir_buf/mem.bin"
+
 out="$(printf ':! echo legacy > %s/legacy.txt\ncat %s/legacy.txt\nexit\n' "$tmpdir10" "$tmpdir10" | ./lunacmd 2>&1)"
 assert_contains "legacy symbols work only with :! prefix" "$out" "legacy"
 
@@ -392,7 +414,7 @@ out="$(printf 'echo ABC :| hexdump -x\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "hexdump reads stdin in pipeline" "$out" "41 42 43 0a"
 
 for cmd in \
-    alias cat cd cksum clear cp date echo exec fold head hexdump inca ls mkdir more mv prompt pwd rm rmdir setprompt sleep source type wc which
+    alias cat cd cksum clear cp date echo exec fold head hexdump inca ls lunabuffer mkdir more mv prompt pwd rm rmdir setprompt sleep source type wc which
 do
     assert_builtin_help "$cmd"
 done

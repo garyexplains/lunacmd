@@ -65,6 +65,8 @@ source hello.lua
 - `lunacmd` is Lua-first: normal lines are treated as Lua-friendly command input.
 - Use lunacmd operators for redirection and pipeline parsing:
   - `:>`, `:>>`, `:<`, `:|`
+- Special buffer targets are available for redirection/input:
+  - `:@mem` and `:@file`
 - Use `:!` prefix to opt into legacy shell symbols (`>`, `<`, `|`, etc.).
 - Prompt customization (`PROMPT`, `PROMPT_CONT`) is documented in `docs/language.md`.
 - Lua one-liners and quick tricks are in `docs/lua-cheatsheet.md`.
