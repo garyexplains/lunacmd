@@ -174,6 +174,21 @@ assert_contains "echo with no args prints blank line before exit" "$out" "echo
 
 exit"
 
+tmpdir_preview="$(mktemp -d)"
+out="$(printf 'preview on\necho DRYRUN_ONLY :> %s/out.txt\npreview off\ncat %s/out.txt\nexit\n' "$tmpdir_preview" "$tmpdir_preview" | ./lunacmd 2>&1)"
+assert_contains "preview mode prints execution plan" "$out" "[preview] line: echo DRYRUN_ONLY :> $tmpdir_preview/out.txt"
+assert_contains "preview mode skips execution side effects" "$out" "cat: cannot open '$tmpdir_preview/out.txt'"
+out="$(printf 'preview on\npreview run echo RUN_ONCE :> %s/once.txt\npreview status\npreview off\ncat %s/once.txt\nexit\n' "$tmpdir_preview" "$tmpdir_preview" | ./lunacmd 2>&1)"
+assert_contains "preview run prints execution plan" "$out" "[preview] line: echo RUN_ONCE :> $tmpdir_preview/once.txt"
+assert_contains "preview run keeps command as dry-run" "$out" "cat: cannot open '$tmpdir_preview/once.txt'"
+assert_contains "preview run keeps global preview mode on" "$out" "preview: on"
+out="$(printf 'preview on\npreview exec echo EXEC_ONCE :> %s/exec.txt\ny\npreview status\npreview off\ncat %s/exec.txt\nexit\n' "$tmpdir_preview" "$tmpdir_preview" | ./lunacmd 2>&1)"
+assert_contains "preview exec asks for confirmation" "$out" "[preview] execution: awaiting confirmation"
+assert_contains "preview exec confirms execution" "$out" "[preview] execution confirmed"
+assert_contains "preview exec executes after confirmation" "$out" "EXEC_ONCE"
+assert_contains "preview exec keeps global preview mode on" "$out" "preview: on"
+rm -rf "$tmpdir_preview"
+
 tmphist="$(mktemp -d)"
 trap 'rm -rf "$tmphist"' EXIT INT TERM
 out="$(cat <<'EOF' | HOME="$tmphist" LUNACMD_NO_RC= ./lunacmd 2>&1
@@ -494,7 +509,7 @@ out="$(printf 'echo ABC :| hexdump -x\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "hexdump reads stdin in pipeline" "$out" "41 42 43 0a"
 
 for cmd in \
-    alias bg cat cd cksum clear cp date echo exec fg fold head hexdump history inca jobs ls lunabuffer mkdir more mv prompt pwd rm rmdir setprompt sleep source tail tui type wc which
+    alias bg cat cd cksum clear cp date echo exec fg fold head hexdump history inca jobs ls lunabuffer mkdir more mv preview prompt pwd rm rmdir setprompt sleep source tail tui type wc which
 do
     assert_builtin_help "$cmd"
 done

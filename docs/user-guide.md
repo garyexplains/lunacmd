@@ -158,6 +158,65 @@ Behavior:
 - `bg %N` resumes stopped job in background.
 - job IDs reset to `%1` when no jobs remain.
 
+## Dry-Run Preview Mode
+
+Use preview mode to inspect what would run, without executing commands.
+
+Commands:
+
+```text
+preview on
+preview off
+preview status
+preview run <command...>
+preview exec <command...>
+```
+
+When preview mode is on, `lunacmd` prints an execution plan and skips execution.
+
+Plan output includes:
+
+- original line
+- current working directory
+- each command stage and resolved kind
+- argv after expansion
+- redirections
+- pipeline/background markers
+- risk label (`safe`, `mutating`, `external`)
+
+Example:
+
+```text
+preview on
+echo hello :> /tmp/out.txt
+preview off
+```
+
+`/tmp/out.txt` is not created while preview is on.
+
+### One-Shot Plan Only
+
+Use `preview run` to print a plan for one command without executing it:
+
+```text
+preview on
+preview run echo once :> /tmp/once.txt
+preview status
+```
+
+This keeps preview mode set to `on` and does not create `/tmp/once.txt`.
+
+### One-Shot Execute with Confirmation
+
+Use `preview exec` to ask for confirmation, then execute once if approved:
+
+```text
+preview on
+preview exec echo once :> /tmp/once.txt
+```
+
+`lunacmd` shows the plan, prompts `[y/N]`, and executes only when you answer `y`.
+
 ## History and Recall
 
 History is stored in `~/.lunacmd/history` and persists across sessions.

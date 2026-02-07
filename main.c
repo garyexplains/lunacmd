@@ -122,6 +122,9 @@ static Job *g_jobs = NULL;
 static int g_job_count = 0;
 static int g_next_job_id = 1;
 static pid_t g_shell_pgid = 0;
+static int g_preview_mode = 0;
+
+static int expand_builtin_globs(lua_State *L, char ***argv_ptr, int *argc_ptr, char *err, size_t err_size);
 
 static int starts_with(const char *s, const char *prefix) {
     return strncmp(s, prefix, strlen(prefix)) == 0;
@@ -1302,6 +1305,29 @@ static int lua_history_path(lua_State *L) {
     return 1;
 }
 
+static void sync_preview_mode_from_lua(lua_State *L) {
+    lua_getglobal(L, "PREVIEW_MODE");
+    if (lua_isboolean(L, -1)) {
+        g_preview_mode = lua_toboolean(L, -1) ? 1 : 0;
+    }
+    lua_pop(L, 1);
+}
+
+static int lua_preview_get(lua_State *L) {
+    sync_preview_mode_from_lua(L);
+    lua_pushboolean(L, g_preview_mode);
+    return 1;
+}
+
+static int lua_preview_set(lua_State *L) {
+    int enabled = lua_toboolean(L, 1) ? 1 : 0;
+    g_preview_mode = enabled;
+    lua_pushboolean(L, g_preview_mode);
+    lua_setglobal(L, "PREVIEW_MODE");
+    lua_pushboolean(L, g_preview_mode);
+    return 1;
+}
+
 static int lua_jobs_list(lua_State *L) {
     int i;
     poll_jobs();
@@ -1894,6 +1920,170 @@ static void set_lua_command_globals(lua_State *L, const CommandNode *cmd) {
 
     lua_pushinteger(L, cmd->argc - 1);
     lua_setglobal(L, "ARGC");
+}
+
+static const char *redirection_name(RedirType type) {
+    if (type == REDIR_IN) {
+        return "stdin";
+    }
+    if (type == REDIR_OUT) {
+        return "stdout";
+    }
+    if (type == REDIR_OUT_APPEND) {
+        return "stdout-append";
+    }
+    if (type == REDIR_ERR_OUT) {
+        return "stderr";
+    }
+    if (type == REDIR_ERR_OUT_APPEND) {
+        return "stderr-append";
+    }
+    if (type == REDIR_ERR_TO_OUT) {
+        return "stderr->stdout";
+    }
+    return "unknown";
+}
+
+static int command_is_mutating_builtin(const char *name) {
+    const char *mutating[] = {"cp", "mv", "rm", "mkdir", "rmdir", "lunabuffer", "setprompt", "alias"};
+    int i;
+    for (i = 0; i < (int)(sizeof(mutating) / sizeof(mutating[0])); i++) {
+        if (strcmp(name, mutating[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int ast_has_output_redirection(const CommandAst *ast) {
+    int i, j;
+    for (i = 0; i < ast->pipeline.command_count; i++) {
+        const CommandNode *cmd = &ast->pipeline.commands[i];
+        for (j = 0; j < cmd->redir_count; j++) {
+            RedirType t = cmd->redirs[j].type;
+            if (t == REDIR_OUT || t == REDIR_OUT_APPEND || t == REDIR_ERR_OUT || t == REDIR_ERR_OUT_APPEND
+                || t == REDIR_ERR_TO_OUT) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void print_preview_plan(
+    lua_State *L, const CommandAst *ast, const char *line, int background, const char *execution_state) {
+    int i, j;
+    int has_external = 0;
+    int mutating = ast_has_output_redirection(ast);
+    const char *risk = "safe";
+
+    printf("[preview] line: %s\n", line ? line : "");
+    lua_getglobal(L, "G_CWD");
+    if (lua_isstring(L, -1)) {
+        printf("[preview] cwd: %s\n", lua_tostring(L, -1));
+    }
+    lua_pop(L, 1);
+
+    for (i = 0; i < ast->pipeline.command_count; i++) {
+        const CommandNode *cmd = &ast->pipeline.commands[i];
+        char **argv = NULL;
+        int argc = 0;
+        int is_user_builtin = 0;
+        int has_builtin = 0;
+        char builtin_path[PATH_MAX];
+        char alias_err[MAX_PARSE_ERR];
+        char glob_err[MAX_PARSE_ERR];
+        const char *kind = "lua-fallback";
+
+        if (!copy_command_argv(cmd, &argv, &argc, alias_err, sizeof(alias_err))) {
+            fprintf(stderr, "[preview] warning: %s\n", alias_err);
+            continue;
+        }
+
+        if (!expand_alias_argv(L, cmd, &argv, &argc, alias_err, sizeof(alias_err))) {
+            fprintf(stderr, "[preview] warning: alias expansion failed: %s\n", alias_err);
+            free_argv_list(argv, argc);
+            continue;
+        }
+
+        has_builtin = argc > 0
+            ? resolve_builtin_path_for_name(argv[0], builtin_path, sizeof(builtin_path), &is_user_builtin)
+            : 0;
+
+        if (has_builtin) {
+            kind = is_user_builtin ? "user-builtin" : "core-builtin";
+            if (!expand_builtin_globs(L, &argv, &argc, glob_err, sizeof(glob_err))) {
+                fprintf(stderr, "[preview] warning: glob expansion failed: %s\n", glob_err);
+            }
+        } else if (argc > 0 && strcmp(argv[0], "exec") == 0) {
+            kind = "external";
+            has_external = 1;
+        } else if (argc > 0) {
+            kind = "lua-fallback";
+        }
+
+        if (argc > 0 && command_is_mutating_builtin(argv[0])) {
+            mutating = 1;
+        }
+
+        printf("[preview] cmd[%d] kind=%s", i + 1, kind);
+        if (has_builtin) {
+            printf(" path=%s", builtin_path);
+        }
+        printf("\n");
+
+        for (j = 0; j < argc; j++) {
+            printf("[preview]   argv[%d]=%s\n", j, argv[j] ? argv[j] : "");
+        }
+        for (j = 0; j < cmd->redir_count; j++) {
+            Redirection *r = &cmd->redirs[j];
+            printf("[preview]   redir %s -> %s\n", redirection_name(r->type), r->target ? r->target : "");
+        }
+        free_argv_list(argv, argc);
+    }
+
+    if (ast->pipeline.command_count > 1) {
+        printf("[preview] pipeline: %d stages\n", ast->pipeline.command_count);
+    }
+    if (background) {
+        printf("[preview] background: yes\n");
+    }
+
+    if (has_external) {
+        risk = "external";
+    } else if (mutating) {
+        risk = "mutating";
+    }
+    printf("[preview] risk: %s\n", risk);
+    printf("[preview] execution: %s\n", execution_state ? execution_state : "skipped");
+}
+
+static int confirm_preview_exec(void) {
+    char c;
+    int seen = 0;
+    int yes = 0;
+    ssize_t n;
+    printf("[preview] execute this command? [y/N] ");
+    fflush(stdout);
+    while ((n = read(STDIN_FILENO, &c, 1)) == 1) {
+        if (!seen) {
+            if (c == '\n') {
+                break;
+            }
+            if (isspace((unsigned char)c)) {
+                continue;
+            }
+            seen = 1;
+            yes = (c == 'y' || c == 'Y') ? 1 : 0;
+        }
+        if (c == '\n') {
+            break;
+        }
+    }
+    if (!seen) {
+        return 0;
+    }
+    return yes;
 }
 
 /* Read a string, and return a pointer to it.
@@ -3102,6 +3292,7 @@ static int is_parent_builtin_name(const char *name) {
         "source",
         "setprompt",
         "alias",
+        "preview",
         "history",
         "lunabuffer",
         "tui",
@@ -3158,6 +3349,7 @@ static int run_job_command(lua_State *L, const CommandAst *ast, const char *line
     int jid;
 
     *status_out = 0;
+    fflush(NULL);
     pid = fork();
     if (pid < 0) {
         fprintf(stderr, "Job launch error: %s\n", strerror(errno));
@@ -3277,6 +3469,12 @@ int main() {
     lua_setglobal(L, "_JOB_FG");
     lua_pushcfunction(L, lua_job_bg);
     lua_setglobal(L, "_JOB_BG");
+    lua_pushcfunction(L, lua_preview_get);
+    lua_setglobal(L, "_PREVIEW_GET");
+    lua_pushcfunction(L, lua_preview_set);
+    lua_setglobal(L, "_PREVIEW_SET");
+    lua_pushboolean(L, 0);
+    lua_setglobal(L, "PREVIEW_MODE");
     lua_pushcfunction(L, lua_alias_fn);
     lua_setglobal(L, "alias");
     lua_newtable(L);
@@ -3309,6 +3507,9 @@ int main() {
         const char *history_line;
         char *run_line = NULL;
         int background = 0;
+        int force_preview_run = 0;
+        int force_preview_exec = 0;
+        int bypass_preview_skip = 0;
         ParseSyntaxMode parse_mode = SYNTAX_LUNA;
         int exec_ok = 1;
         char history_err[MAX_PARSE_ERR];
@@ -3362,6 +3563,38 @@ int main() {
             last_mode = "lua";
         }
 
+        sync_preview_mode_from_lua(L);
+
+        if (starts_with(parse_line, "preview run")
+            && (parse_line[11] == '\0' || isspace((unsigned char)parse_line[11]))) {
+            force_preview_run = 1;
+            parse_line += 11;
+            while (*parse_line && isspace((unsigned char)*parse_line)) {
+                parse_line++;
+            }
+            if (*parse_line == '\0') {
+                fprintf(stderr, "preview: usage: preview run <command...>\n");
+                free(history_expanded);
+                free(line);
+                continue;
+            }
+        }
+
+        if (starts_with(parse_line, "preview exec")
+            && (parse_line[12] == '\0' || isspace((unsigned char)parse_line[12]))) {
+            force_preview_exec = 1;
+            parse_line += 12;
+            while (*parse_line && isspace((unsigned char)*parse_line)) {
+                parse_line++;
+            }
+            if (*parse_line == '\0') {
+                fprintf(stderr, "preview: usage: preview exec <command...>\n");
+                free(history_expanded);
+                free(line);
+                continue;
+            }
+        }
+
         if (!strip_background_suffix(parse_line, &run_line, &background)) {
             fprintf(stderr, "Parse error: out of memory\n");
             free(history_expanded);
@@ -3392,6 +3625,38 @@ int main() {
 
         if ((strcmp("quit", cmd->argv[0]) == 0) || (strcmp("exit", cmd->argv[0]) == 0)) {
             done = 1;
+            free_command_ast(&ast);
+            free(run_line);
+            free(history_expanded);
+            free(line);
+            continue;
+        }
+
+        sync_preview_mode_from_lua(L);
+        if (force_preview_run) {
+            print_preview_plan(L, &ast, parse_line, background, "skipped");
+            free_command_ast(&ast);
+            free(run_line);
+            free(history_expanded);
+            free(line);
+            continue;
+        }
+        if (force_preview_exec) {
+            print_preview_plan(L, &ast, parse_line, background, "awaiting confirmation");
+            if (!confirm_preview_exec()) {
+                printf("[preview] execution canceled\n");
+                free_command_ast(&ast);
+                free(run_line);
+                free(history_expanded);
+                free(line);
+                continue;
+            }
+            printf("[preview] execution confirmed\n");
+            bypass_preview_skip = 1;
+        }
+        if (g_preview_mode && !(ast.pipeline.command_count == 1 && strcmp(cmd->argv[0], "preview") == 0)
+            && !bypass_preview_skip) {
+            print_preview_plan(L, &ast, parse_line, background, "skipped");
             free_command_ast(&ast);
             free(run_line);
             free(history_expanded);

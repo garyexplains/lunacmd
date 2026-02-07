@@ -22,6 +22,10 @@ This lists builtins currently present in `builtin/`.
   - Sets `PROMPT` (or `PROMPT_CONT` with `--cont`) at runtime.
 - `prompt`
   - Prints current prompt configuration.
+- `preview [on|off|status]`
+  - Toggles dry-run mode.
+  - `preview run <command...>` prints preview plan only (no execution).
+  - `preview exec <command...>` prompts for confirmation, then executes once if confirmed.
 - `lunabuffer`
   - Manage special redirect buffers:
     - `lunabuffer status`

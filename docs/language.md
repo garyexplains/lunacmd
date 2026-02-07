@@ -90,6 +90,30 @@ Manage jobs:
 
 Foreground jobs receive terminal signals (for example `Ctrl-C`) without exiting `lunacmd`.
 
+## Dry-Run Preview Mode
+
+Use `preview` to toggle execution preview:
+
+- `preview on`
+- `preview off`
+- `preview status`
+- `preview run <command...>`
+- `preview exec <command...>`
+
+When preview mode is on, commands are parsed and shown as an execution plan, but not run.
+
+Use one-shot dry-run without changing mode:
+
+```text
+preview run echo hello :> /tmp/out.txt
+```
+
+Use one-shot execution with confirmation:
+
+```text
+preview exec echo hello :> /tmp/out.txt
+```
+
 ## Command Substitution (Backticks)
 
 In command mode for builtins (including `exec`), you can embed Lua expressions in backticks:
