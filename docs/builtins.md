@@ -32,6 +32,13 @@ This lists builtins currently present in `builtin/`.
   - Prints resolved command path for each command (or `lua-fallback`).
 - `type CMD...`
   - Prints resolution kind (core builtin, user builtin, lua fallback).
+- `history [N]`
+  - Shows command history.
+  - `history -c` clears history.
+  - `history -w` writes history to disk.
+  - `history -r` reloads history from disk.
+- `tui on|off|status`
+  - Enables/disables the built-in 3-pane terminal UI layout.
 
 ## Display and Utility
 

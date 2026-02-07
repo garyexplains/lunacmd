@@ -47,6 +47,13 @@ end
 
 if not target or target == "" then
     target = os.getenv("HOME") or base
+elseif target == "~" then
+    target = os.getenv("HOME") or base
+elseif target:sub(1, 2) == "~/" then
+    local home = os.getenv("HOME")
+    if home and home ~= "" then
+        target = home .. target:sub(2)
+    end
 elseif target:sub(1, 1) ~= "/" then
     target = base .. "/" .. target
 end

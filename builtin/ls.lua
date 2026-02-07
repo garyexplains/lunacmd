@@ -37,9 +37,23 @@ local function usage()
 end
 
 local function resolve_path(path)
+    path = tostring(path or "")
+    if type(_RESOLVE_PATH) == "function" then
+        local resolved = _RESOLVE_PATH(path)
+        if resolved then
+            return resolved
+        end
+    end
     local base = G_CWD or "."
+    local home = os.getenv("HOME")
     if path == "" then
         return base
+    end
+    if path == "~" and home and home ~= "" then
+        return home
+    end
+    if path:sub(1, 2) == "~/" and home and home ~= "" then
+        return home .. path:sub(2)
     end
     if path:sub(1, 1) == "/" then
         return path
@@ -56,6 +70,85 @@ end
 
 local function basename(path)
     return (path:gsub("/+$", ""):match("([^/]+)$") or path)
+end
+
+local function has_glob_chars(s)
+    return tostring(s or ""):find("[%*%?%[]") ~= nil
+end
+
+local function split_dir_base(path)
+    local slash = path:match("^.*()/")
+    if slash then
+        local dir = path:sub(1, slash - 1)
+        if dir == "" then
+            dir = "/"
+        end
+        return dir, path:sub(slash + 1)
+    end
+    return ".", path
+end
+
+local function glob_to_lua_pattern(glob)
+    local out = { "^" }
+    local i = 1
+    while i <= #glob do
+        local c = glob:sub(i, i)
+        if c == "*" then
+            out[#out + 1] = ".*"
+        elseif c == "?" then
+            out[#out + 1] = "."
+        elseif c == "[" then
+            local j = glob:find("%]", i + 1, true)
+            if j then
+                local cls = glob:sub(i + 1, j - 1)
+                if cls:sub(1, 1) == "!" then
+                    cls = "^" .. cls:sub(2)
+                end
+                cls = cls:gsub("%%", "%%%%")
+                out[#out + 1] = "[" .. cls .. "]"
+                i = j
+            else
+                out[#out + 1] = "%%%["
+            end
+        elseif c:match("[%(%)%%%.%+%-%^%$]") then
+            out[#out + 1] = "%" .. c
+        else
+            out[#out + 1] = c
+        end
+        i = i + 1
+    end
+    out[#out + 1] = "$"
+    return table.concat(out)
+end
+
+local function expand_glob_arg(raw)
+    local dir_part, base_glob = split_dir_base(raw)
+    local scan_dir_path = resolve_path(dir_part)
+    local names, err = _LISTDIR(scan_dir_path)
+    local matches = {}
+    local pattern
+
+    if not names then
+        return { raw }, err
+    end
+
+    pattern = glob_to_lua_pattern(base_glob)
+    for _, name in ipairs(names) do
+        if name ~= "." and name ~= ".." and name:match(pattern) then
+            if dir_part == "." then
+                matches[#matches + 1] = name
+            elseif dir_part == "/" then
+                matches[#matches + 1] = "/" .. name
+            else
+                matches[#matches + 1] = dir_part .. "/" .. name
+            end
+        end
+    end
+    table.sort(matches)
+    if #matches == 0 then
+        return { raw }
+    end
+    return matches
 end
 
 local function stat_path(path, follow)
@@ -422,7 +515,14 @@ while i <= (ARGC or 0) do
             j = j + 1
         end
     else
-        targets[#targets + 1] = arg
+        if has_glob_chars(arg) then
+            local expanded = expand_glob_arg(arg)
+            for _, v in ipairs(expanded) do
+                targets[#targets + 1] = v
+            end
+        else
+            targets[#targets + 1] = arg
+        end
     end
 
     i = i + 1

@@ -13,6 +13,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <fnmatch.h>
 #include <readline/history.h>
 #include <readline/readline.h>
 #include <limits.h>
@@ -24,6 +25,7 @@
 #include <stdint.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -101,6 +103,8 @@ static int next_token(
 static char *dup_cstr(const char *s);
 static void free_token(Token *token);
 static LunaBufferState g_luna_buffer = {{0}, {0}, 16 * 1024, 0};
+static char g_history_path[PATH_MAX];
+static int g_history_path_ready = 0;
 
 static int starts_with(const char *s, const char *prefix) {
     return strncmp(s, prefix, strlen(prefix)) == 0;
@@ -214,6 +218,43 @@ static int init_luna_buffers(void) {
     close(fd);
 
     g_luna_buffer.initialized = 1;
+    return 1;
+}
+
+static int init_history_path(void) {
+    const char *home = getenv("HOME");
+    int fd;
+
+    if (g_history_path_ready) {
+        return 1;
+    }
+
+    if (home && *home) {
+        char dir_path[PATH_MAX];
+        if (snprintf(dir_path, sizeof(dir_path), "%s/.lunacmd", home) < (int)sizeof(dir_path)
+            && ensure_parent_dir(dir_path)
+            && snprintf(g_history_path, sizeof(g_history_path), "%s/history", dir_path)
+                   < (int)sizeof(g_history_path)) {
+            fd = open(g_history_path, O_RDWR | O_CREAT, 0600);
+            if (fd >= 0) {
+                close(fd);
+                g_history_path_ready = 1;
+                return 1;
+            }
+        }
+    }
+
+    if (snprintf(g_history_path, sizeof(g_history_path), "/tmp/lunacmd-history-%ld", (long)getuid())
+        >= (int)sizeof(g_history_path)) {
+        return 0;
+    }
+    fd = open(g_history_path, O_RDWR | O_CREAT, 0600);
+    if (fd < 0) {
+        return 0;
+    }
+    close(fd);
+
+    g_history_path_ready = 1;
     return 1;
 }
 
@@ -1089,6 +1130,82 @@ static int lua_lunabuffer_save(lua_State *L) {
     return 1;
 }
 
+static int lua_history_list(lua_State *L) {
+    HIST_ENTRY **entries;
+    int i = 0;
+
+    lua_newtable(L);
+    entries = history_list();
+    if (!entries) {
+        return 1;
+    }
+
+    while (entries[i]) {
+        lua_newtable(L);
+        lua_pushstring(L, "id");
+        lua_pushinteger(L, (lua_Integer)(history_base + i));
+        lua_settable(L, -3);
+        lua_pushstring(L, "line");
+        lua_pushstring(L, entries[i]->line ? entries[i]->line : "");
+        lua_settable(L, -3);
+        lua_pushinteger(L, i + 1);
+        lua_pushvalue(L, -2);
+        lua_settable(L, -4);
+        lua_pop(L, 1);
+        i++;
+    }
+    return 1;
+}
+
+static int lua_history_clear(lua_State *L) {
+    clear_history();
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int lua_history_read(lua_State *L) {
+    int rc;
+    if (!init_history_path()) {
+        lua_pushnil(L);
+        lua_pushstring(L, "failed to initialize history path");
+        return 2;
+    }
+    rc = read_history(g_history_path);
+    if (rc != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, strerror(errno));
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int lua_history_write(lua_State *L) {
+    int rc;
+    if (!init_history_path()) {
+        lua_pushnil(L);
+        lua_pushstring(L, "failed to initialize history path");
+        return 2;
+    }
+    rc = write_history(g_history_path);
+    if (rc != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, strerror(errno));
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int lua_history_path(lua_State *L) {
+    if (!init_history_path()) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushstring(L, g_history_path);
+    return 1;
+}
+
 static void free_token(Token *token) {
     if (token->text) {
         free(token->text);
@@ -1602,9 +1719,6 @@ static char *read_repl_input(lua_State *L, int *warned_prompt, int *warned_promp
                     free(combined);
                     return NULL;
                 }
-                if (*combined) {
-                    add_history(combined);
-                }
             }
             return combined;
         }
@@ -1628,9 +1742,6 @@ static char *read_repl_input(lua_State *L, int *warned_prompt, int *warned_promp
         if (!append_char(&combined, &combined_len, &combined_cap, '\0')) {
             free(combined);
             return NULL;
-        }
-        if (*combined) {
-            add_history(combined);
         }
         return combined;
     }
@@ -1658,16 +1769,8 @@ static int ensure_saved_fd(int target_fd, int *slot) {
     return *slot >= 0;
 }
 
-static int resolve_redirection_path(lua_State *L, const char *target, char *out, size_t out_size) {
+static const char *get_lua_cwd(lua_State *L) {
     const char *cwd = ".";
-
-    if (!target || !*target) {
-        return 0;
-    }
-    if (target[0] == '/') {
-        return snprintf(out, out_size, "%s", target) < (int)out_size;
-    }
-
     lua_getglobal(L, "G_CWD");
     if (lua_isstring(L, -1)) {
         cwd = lua_tostring(L, -1);
@@ -1676,8 +1779,117 @@ static int resolve_redirection_path(lua_State *L, const char *target, char *out,
         cwd = ".";
     }
     lua_pop(L, 1);
+    return cwd;
+}
+
+static int resolve_path_with_context(lua_State *L, const char *target, char *out, size_t out_size) {
+    const char *cwd;
+    const char *home;
+
+    if (!target) {
+        return 0;
+    }
+    cwd = get_lua_cwd(L);
+
+    if (!*target) {
+        return snprintf(out, out_size, "%s", cwd) < (int)out_size;
+    }
+    if (target[0] == '/') {
+        return snprintf(out, out_size, "%s", target) < (int)out_size;
+    }
+    if (target[0] == '~') {
+        home = getenv("HOME");
+        if (home && *home) {
+            if (target[1] == '\0') {
+                return snprintf(out, out_size, "%s", home) < (int)out_size;
+            }
+            if (target[1] == '/') {
+                return snprintf(out, out_size, "%s%s", home, target + 1) < (int)out_size;
+            }
+        }
+    }
 
     return snprintf(out, out_size, "%s/%s", cwd, target) < (int)out_size;
+}
+
+static int lua_resolve_path(lua_State *L) {
+    const char *target = luaL_checkstring(L, 1);
+    char out[PATH_MAX];
+
+    if (!resolve_path_with_context(L, target, out, sizeof(out))) {
+        lua_pushnil(L);
+        lua_pushstring(L, "path too long");
+        return 2;
+    }
+    lua_pushstring(L, out);
+    return 1;
+}
+
+static int resolve_redirection_path(lua_State *L, const char *target, char *out, size_t out_size) {
+    return resolve_path_with_context(L, target, out, out_size);
+}
+
+static int expand_history_event(const char *line, char **expanded_out, char *err, size_t err_size) {
+    int target_id = 0;
+    int last_id;
+    HIST_ENTRY *entry = NULL;
+
+    *expanded_out = NULL;
+    if (!line || line[0] != '!') {
+        return 0;
+    }
+
+    if (!line[1]) {
+        snprintf(err, err_size, "history: invalid event");
+        return -1;
+    }
+
+    if (history_length <= 0) {
+        snprintf(err, err_size, "history: event not found");
+        return -1;
+    }
+    last_id = history_base + history_length - 1;
+
+    if (strcmp(line, "!!") == 0) {
+        target_id = last_id;
+    } else if (line[1] == '-') {
+        char *end = NULL;
+        long n = strtol(line + 2, &end, 10);
+        if (line[2] == '\0' || *end != '\0' || n <= 0) {
+            snprintf(err, err_size, "history: invalid event '%s'", line);
+            return -1;
+        }
+        target_id = last_id - (int)n + 1;
+    } else if (isdigit((unsigned char)line[1])) {
+        char *end = NULL;
+        long n = strtol(line + 1, &end, 10);
+        if (*end != '\0' || n <= 0) {
+            snprintf(err, err_size, "history: invalid event '%s'", line);
+            return -1;
+        }
+        target_id = (int)n;
+    } else {
+        snprintf(err, err_size, "history: unsupported event '%s'", line);
+        return -1;
+    }
+
+    if (target_id < history_base || target_id > last_id) {
+        snprintf(err, err_size, "history: event not found: %s", line);
+        return -1;
+    }
+
+    entry = history_get(target_id);
+    if (!entry || !entry->line) {
+        snprintf(err, err_size, "history: event not found: %s", line);
+        return -1;
+    }
+
+    *expanded_out = dup_cstr(entry->line);
+    if (!*expanded_out) {
+        snprintf(err, err_size, "history: out of memory");
+        return -1;
+    }
+    return 1;
 }
 
 static int apply_redirections(
@@ -1809,6 +2021,387 @@ static void restore_redirections(FdSnapshot *snap) {
     }
 }
 
+static int has_glob_chars(const char *s) {
+    if (!s) {
+        return 0;
+    }
+    return strchr(s, '*') || strchr(s, '?') || strchr(s, '[');
+}
+
+static int append_word(char ***items, int *count, const char *s) {
+    char **next;
+    char *copy = dup_cstr(s);
+    if (!copy) {
+        return 0;
+    }
+    next = realloc(*items, sizeof(char *) * (size_t)(*count + 1));
+    if (!next) {
+        free(copy);
+        return 0;
+    }
+    *items = next;
+    (*items)[*count] = copy;
+    (*count)++;
+    return 1;
+}
+
+static int qsort_strcmp(const void *a, const void *b) {
+    const char *const *sa = (const char *const *)a;
+    const char *const *sb = (const char *const *)b;
+    return strcmp(*sa, *sb);
+}
+
+static int split_glob_arg(const char *arg, char *dir_part, size_t dir_size, const char **base_out) {
+    const char *slash = strrchr(arg, '/');
+    if (!slash) {
+        if (snprintf(dir_part, dir_size, ".") >= (int)dir_size) {
+            return 0;
+        }
+        *base_out = arg;
+        return 1;
+    }
+
+    if (slash == arg) {
+        if (snprintf(dir_part, dir_size, "/") >= (int)dir_size) {
+            return 0;
+        }
+    } else {
+        size_t n = (size_t)(slash - arg);
+        if (n + 1 > dir_size) {
+            return 0;
+        }
+        memcpy(dir_part, arg, n);
+        dir_part[n] = '\0';
+    }
+    *base_out = slash + 1;
+    return 1;
+}
+
+static int expand_glob_arg(lua_State *L, const char *arg, char ***out_items, int *out_count) {
+    DIR *dir = NULL;
+    struct dirent *entry;
+    char abs_dir[PATH_MAX];
+    char dir_part[PATH_MAX];
+    const char *base = NULL;
+    char **matches = NULL;
+    int match_count = 0;
+    int i;
+
+    if (!split_glob_arg(arg, dir_part, sizeof(dir_part), &base)) {
+        return append_word(out_items, out_count, arg);
+    }
+    if (!resolve_path_with_context(L, dir_part, abs_dir, sizeof(abs_dir))) {
+        return append_word(out_items, out_count, arg);
+    }
+
+    dir = opendir(abs_dir);
+    if (!dir) {
+        return append_word(out_items, out_count, arg);
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        char composed[PATH_MAX];
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        if (fnmatch(base, entry->d_name, 0) != 0) {
+            continue;
+        }
+        if (strcmp(dir_part, ".") == 0) {
+            if (snprintf(composed, sizeof(composed), "%s", entry->d_name) >= (int)sizeof(composed)) {
+                continue;
+            }
+        } else if (strcmp(dir_part, "/") == 0) {
+            if (snprintf(composed, sizeof(composed), "/%s", entry->d_name) >= (int)sizeof(composed)) {
+                continue;
+            }
+        } else {
+            if (snprintf(composed, sizeof(composed), "%s/%s", dir_part, entry->d_name) >= (int)sizeof(composed)) {
+                continue;
+            }
+        }
+        if (!append_word(&matches, &match_count, composed)) {
+            closedir(dir);
+            free_argv_list(matches, match_count);
+            return 0;
+        }
+    }
+    closedir(dir);
+
+    if (match_count == 0) {
+        free_argv_list(matches, match_count);
+        return append_word(out_items, out_count, arg);
+    }
+
+    qsort(matches, (size_t)match_count, sizeof(char *), qsort_strcmp);
+    for (i = 0; i < match_count; i++) {
+        if (!append_word(out_items, out_count, matches[i])) {
+            free_argv_list(matches, match_count);
+            return 0;
+        }
+    }
+    free_argv_list(matches, match_count);
+    return 1;
+}
+
+static int expand_builtin_globs(lua_State *L, char ***argv_ptr, int *argc_ptr, char *err, size_t err_size) {
+    char **src = *argv_ptr;
+    int src_argc = *argc_ptr;
+    char **dst = NULL;
+    int dst_argc = 0;
+    int i;
+
+    if (src_argc <= 1) {
+        return 1;
+    }
+
+    if (!append_word(&dst, &dst_argc, src[0])) {
+        snprintf(err, err_size, "out of memory");
+        return 0;
+    }
+
+    for (i = 1; i < src_argc; i++) {
+        const char *arg = src[i];
+        if (has_glob_chars(arg)) {
+            if (!expand_glob_arg(L, arg, &dst, &dst_argc)) {
+                free_argv_list(dst, dst_argc);
+                snprintf(err, err_size, "out of memory");
+                return 0;
+            }
+        } else {
+            if (!append_word(&dst, &dst_argc, arg)) {
+                free_argv_list(dst, dst_argc);
+                snprintf(err, err_size, "out of memory");
+                return 0;
+            }
+        }
+    }
+
+    free_argv_list(src, src_argc);
+    *argv_ptr = dst;
+    *argc_ptr = dst_argc;
+    return 1;
+}
+
+static void tui_move_cursor(int row, int col) {
+    if (row < 1) {
+        row = 1;
+    }
+    if (col < 1) {
+        col = 1;
+    }
+    printf("\033[%d;%dH", row, col);
+}
+
+static void tui_print_clipped(int row, int col, int width, const char *text) {
+    int n = 0;
+    const char *p = text ? text : "";
+    if (width <= 0) {
+        return;
+    }
+    tui_move_cursor(row, col);
+    while (*p && n < width) {
+        putchar(*p);
+        p++;
+        n++;
+    }
+}
+
+static int is_tui_mode_enabled(lua_State *L) {
+    int enabled = 0;
+    lua_getglobal(L, "TUI_MODE");
+    enabled = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    return enabled;
+}
+
+static void render_tui(lua_State *L) {
+    struct winsize ws;
+    int rows = 24;
+    int cols = 80;
+    int left_w;
+    int right_w;
+    int top_h;
+    int files_row_start;
+    int files_row_end;
+    int files_rows_available;
+    int files_usable_width;
+    int files_max_name_w = 1;
+    int files_col_w;
+    int files_cols;
+    int history_row_start;
+    int history_row_end;
+    int cmd_row;
+    const char *cwd;
+    DIR *dir;
+    struct dirent *entry;
+    char **names = NULL;
+    int name_count = 0;
+    int i;
+    HIST_ENTRY **hist_entries;
+    int hist_count = 0;
+    int hist_start = 0;
+
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
+        if (ws.ws_row > 0) {
+            rows = ws.ws_row;
+        }
+        if (ws.ws_col > 0) {
+            cols = ws.ws_col;
+        }
+    }
+    if (rows < 8 || cols < 40) {
+        return;
+    }
+
+    left_w = (cols * 80) / 100;
+    if (left_w < 20) {
+        left_w = 20;
+    }
+    if (left_w > cols - 10) {
+        left_w = cols - 10;
+    }
+    right_w = cols - left_w;
+    if (right_w < 8) {
+        right_w = 8;
+        left_w = cols - right_w;
+    }
+
+    top_h = rows / 2;
+    if (top_h < 3) {
+        top_h = 3;
+    }
+    if (top_h > rows - 3) {
+        top_h = rows - 3;
+    }
+
+    printf("\033[2J\033[H");
+
+    for (i = 1; i <= rows; i++) {
+        tui_move_cursor(i, left_w + 1);
+        putchar('|');
+    }
+    for (i = 1; i <= left_w; i++) {
+        tui_move_cursor(top_h + 1, i);
+        putchar('-');
+    }
+
+    tui_print_clipped(1, 2, left_w - 3, "FILES");
+    tui_print_clipped(top_h + 2, 2, left_w - 3, "COMMAND");
+    tui_print_clipped(1, left_w + 3, right_w - 4, "HISTORY");
+
+    cwd = get_lua_cwd(L);
+    tui_print_clipped(1, 10, left_w - 12, cwd);
+
+    files_row_start = 2;
+    files_row_end = top_h;
+    dir = opendir(cwd);
+    if (dir) {
+        while ((entry = readdir(dir)) != NULL) {
+            char **next;
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+                continue;
+            }
+            next = realloc(names, sizeof(char *) * (size_t)(name_count + 1));
+            if (!next) {
+                break;
+            }
+            names = next;
+            names[name_count] = dup_cstr(entry->d_name);
+            if (!names[name_count]) {
+                break;
+            }
+            name_count++;
+        }
+        closedir(dir);
+    }
+    if (name_count > 1) {
+        qsort(names, (size_t)name_count, sizeof(char *), qsort_strcmp);
+    }
+
+    files_rows_available = files_row_end - files_row_start + 1;
+    files_usable_width = left_w - 3;
+    for (i = 0; i < name_count; i++) {
+        int n = (int)strlen(names[i]);
+        if (n > files_max_name_w) {
+            files_max_name_w = n;
+        }
+    }
+    if (files_rows_available < 1) {
+        files_rows_available = 1;
+    }
+    if (files_usable_width < 1) {
+        files_usable_width = 1;
+    }
+    files_col_w = files_max_name_w + 2;
+    if (files_col_w < 4) {
+        files_col_w = 4;
+    }
+    files_cols = files_usable_width / files_col_w;
+    if (files_cols < 1) {
+        files_cols = 1;
+    }
+    if (files_cols > name_count) {
+        files_cols = name_count;
+    }
+
+    for (i = 0; i < files_rows_available; i++) {
+        int c;
+        int row = files_row_start + i;
+        for (c = 0; c < files_cols; c++) {
+            int idx = i * files_cols + c;
+            int col = 2 + (c * files_col_w);
+            int cell_w = files_col_w - 1;
+            if (idx >= name_count || col > left_w - 1) {
+                break;
+            }
+            if (col + cell_w > left_w) {
+                cell_w = left_w - col;
+            }
+            if (cell_w < 1) {
+                continue;
+            }
+            tui_print_clipped(row, col, cell_w, names[idx]);
+        }
+    }
+    for (i = 0; i < name_count; i++) {
+        free(names[i]);
+    }
+    free(names);
+
+    history_row_start = 2;
+    history_row_end = rows;
+    hist_entries = history_list();
+    if (hist_entries) {
+        while (hist_entries[hist_count]) {
+            hist_count++;
+        }
+    }
+    if (hist_count > 0) {
+        int max_lines = history_row_end - history_row_start + 1;
+        if (max_lines < 0) {
+            max_lines = 0;
+        }
+        if (hist_count > max_lines) {
+            hist_start = hist_count - max_lines;
+        }
+        for (i = hist_start; i < hist_count; i++) {
+            char linebuf[512];
+            int row = history_row_start + (i - hist_start);
+            snprintf(
+                linebuf, sizeof(linebuf), "%d %s", history_base + i, hist_entries[i]->line ? hist_entries[i]->line : "");
+            tui_print_clipped(row, left_w + 3, right_w - 4, linebuf);
+        }
+    }
+
+    cmd_row = top_h + 3;
+    if (cmd_row > rows) {
+        cmd_row = rows;
+    }
+    tui_move_cursor(cmd_row, 1);
+    fflush(stdout);
+}
+
 static void build_lua_fallback_chunk(const CommandNode *cmd, char *out, size_t out_size) {
     int i;
     size_t used = 0;
@@ -1836,6 +2429,7 @@ static int execute_single_command(
     FdSnapshot snap;
     char redir_err[MAX_PARSE_ERR];
     char alias_err[MAX_PARSE_ERR];
+    char glob_err[MAX_PARSE_ERR];
 
     if (!expand_alias_argv(L, cmd, &expanded_argv, &expanded_argc, alias_err, sizeof(alias_err))) {
         fprintf(stderr, "Alias error: %s\n", alias_err);
@@ -1848,9 +2442,20 @@ static int execute_single_command(
     effective.redir_count = cmd->redir_count;
     effective.redirs = cmd->redirs;
 
-    set_lua_command_globals(L, &effective);
     has_builtin = resolve_builtin_path_for_name(
         effective.argv[0], builtin_path, sizeof(builtin_path), &is_user_builtin);
+
+    if (has_builtin) {
+        if (!expand_builtin_globs(L, &expanded_argv, &expanded_argc, glob_err, sizeof(glob_err))) {
+            fprintf(stderr, "Glob error: %s\n", glob_err);
+            free_argv_list(expanded_argv, expanded_argc);
+            return 0;
+        }
+        effective.argc = expanded_argc;
+        effective.argv = expanded_argv;
+    }
+
+    set_lua_command_globals(L, &effective);
 
     if (has_builtin) {
         lua_pushstring(L, is_user_builtin ? "user-builtin" : "core-builtin");
@@ -2023,6 +2628,7 @@ int main() {
 
     L = luaL_newstate();
     luaL_openlibs(L);
+    using_history();
     lua_pushcfunction(L, lua_listdir);
     lua_setglobal(L, "_LISTDIR");
     lua_pushcfunction(L, lua_isdir);
@@ -2035,6 +2641,8 @@ int main() {
     lua_setglobal(L, "_GETCH");
     lua_pushcfunction(L, lua_resolve_cmd);
     lua_setglobal(L, "_RESOLVE_CMD");
+    lua_pushcfunction(L, lua_resolve_path);
+    lua_setglobal(L, "_RESOLVE_PATH");
     lua_pushcfunction(L, lua_stat);
     lua_setglobal(L, "_STAT");
     lua_pushcfunction(L, lua_readlink);
@@ -2053,6 +2661,16 @@ int main() {
     lua_setglobal(L, "_LUNABUFFER_CLEAR");
     lua_pushcfunction(L, lua_lunabuffer_save);
     lua_setglobal(L, "_LUNABUFFER_SAVE");
+    lua_pushcfunction(L, lua_history_list);
+    lua_setglobal(L, "_HISTORY_LIST");
+    lua_pushcfunction(L, lua_history_clear);
+    lua_setglobal(L, "_HISTORY_CLEAR");
+    lua_pushcfunction(L, lua_history_read);
+    lua_setglobal(L, "_HISTORY_READ");
+    lua_pushcfunction(L, lua_history_write);
+    lua_setglobal(L, "_HISTORY_WRITE");
+    lua_pushcfunction(L, lua_history_path);
+    lua_setglobal(L, "_HISTORY_PATH");
     lua_pushcfunction(L, lua_alias_fn);
     lua_setglobal(L, "alias");
     lua_newtable(L);
@@ -2061,6 +2679,11 @@ int main() {
     // Initialize shell working directory from process cwd.
     if (!init_luna_buffers()) {
         fprintf(stderr, "Failed to initialize lunabuffer paths\n");
+    }
+    if (!init_history_path()) {
+        fprintf(stderr, "Failed to initialize history path\n");
+    } else {
+        read_history(g_history_path);
     }
 
     if (getcwd(cwd, sizeof(cwd)) != NULL) {
@@ -2075,9 +2698,15 @@ int main() {
         CommandAst ast;
         CommandNode *cmd;
         const char *parse_line;
+        const char *history_line;
         ParseSyntaxMode parse_mode = SYNTAX_LUNA;
         int exec_ok = 1;
+        char history_err[MAX_PARSE_ERR];
+        char *history_expanded = NULL;
 
+        if (is_tui_mode_enabled(L)) {
+            render_tui(L);
+        }
         update_prompt_context(L, last_status, last_mode);
         char *line = read_repl_input(L, &warned_prompt, &warned_prompt_cont);
 
@@ -2090,6 +2719,26 @@ int main() {
         while (*parse_line && isspace((unsigned char)*parse_line)) {
             parse_line++;
         }
+        history_line = parse_line;
+
+        {
+            int exp = expand_history_event(parse_line, &history_expanded, history_err, sizeof(history_err));
+            if (exp < 0) {
+                fprintf(stderr, "%s\n", history_err);
+                free(line);
+                continue;
+            }
+            if (exp > 0 && history_expanded) {
+                printf("%s\n", history_expanded);
+                parse_line = history_expanded;
+                history_line = history_expanded;
+            }
+        }
+
+        if (*history_line) {
+            add_history(history_line);
+        }
+
         if (starts_with(parse_line, ":!")) {
             parse_mode = SYNTAX_LEGACY;
             parse_line += 2;
@@ -2103,12 +2752,14 @@ int main() {
 
         if (!parse_to_ast(parse_line, parse_mode, &ast, parse_err, sizeof(parse_err))) {
             fprintf(stderr, "Parse error: %s\n", parse_err);
+            free(history_expanded);
             free(line);
             continue;
         }
 
         if (ast.pipeline.command_count == 0) {
             free_command_ast(&ast);
+            free(history_expanded);
             free(line);
             continue;
         }
@@ -2118,6 +2769,7 @@ int main() {
         if ((strcmp("quit", cmd->argv[0]) == 0) || (strcmp("exit", cmd->argv[0]) == 0)) {
             done = 1;
             free_command_ast(&ast);
+            free(history_expanded);
             free(line);
             continue;
         }
@@ -2129,7 +2781,11 @@ int main() {
         }
         last_status = exec_ok ? 0 : 1;
         free_command_ast(&ast);
+        free(history_expanded);
         free(line);
+    }
+    if (g_history_path_ready) {
+        write_history(g_history_path);
     }
     lua_close(L);
 

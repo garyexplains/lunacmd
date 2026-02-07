@@ -61,6 +61,42 @@ assert_not_contains "ls /tmp does not error" "$out" "ls: cannot access '/tmp'"
 out="$(printf 'cd /tmp\nls definitely_missing_luna_dir\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "ls missing relative path reports absolute target" "$out" "ls: cannot access '/tmp/definitely_missing_luna_dir'"
 
+tmphome_tilde="$(mktemp -d)"
+trap 'rm -rf "$tmphome_tilde"' EXIT INT TERM
+mkdir -p "$tmphome_tilde/tmp"
+printf 'tilde_file_ok\n' > "$tmphome_tilde/tmp/file.txt"
+
+out="$(printf 'ls ~\nexit\n' | HOME="$tmphome_tilde" ./lunacmd 2>&1)"
+assert_contains "ls supports tilde HOME expansion" "$out" "tmp"
+
+out="$(printf 'cat ~/tmp/file.txt\nexit\n' | HOME="$tmphome_tilde" ./lunacmd 2>&1)"
+assert_contains "cat supports tilde HOME expansion" "$out" "tilde_file_ok"
+
+out="$(printf 'echo via_tilde :> ~/tmp/out.txt\ncat ~/tmp/out.txt\nexit\n' | HOME="$tmphome_tilde" ./lunacmd 2>&1)"
+assert_contains "redirection supports tilde HOME expansion" "$out" "via_tilde"
+
+out="$(printf 'exec ls ~\nexit\n' | HOME="$tmphome_tilde" ./lunacmd 2>&1)"
+assert_contains "exec supports tilde HOME expansion for args" "$out" "tmp"
+
+tmpglob="$(mktemp -d)"
+trap 'rm -rf "$tmphome_tilde" "$tmpglob"' EXIT INT TERM
+printf 'g1\n' > "$tmpglob/g1.txt"
+printf 'g2\n' > "$tmpglob/g2.txt"
+printf 'plain\n' > "$tmpglob/plain.dat"
+out="$(printf 'cd %s\nls *.txt\nexit\n' "$tmpglob" | ./lunacmd 2>&1)"
+assert_contains "ls expands glob arguments" "$out" "g1.txt"
+assert_contains "ls expands glob arguments second match" "$out" "g2.txt"
+assert_not_contains "ls glob only includes matching files" "$out" "plain.dat"
+out="$(printf 'cd %s\ncat *.txt\nexit\n' "$tmpglob" | ./lunacmd 2>&1)"
+assert_contains "cat expands glob arguments first file" "$out" "g1"
+assert_contains "cat expands glob arguments second file" "$out" "g2"
+out="$(printf 'cd %s\nhead -n 1 *.txt\nexit\n' "$tmpglob" | ./lunacmd 2>&1)"
+assert_contains "head expands glob arguments first file header" "$out" "g1.txt"
+assert_contains "head expands glob arguments second file header" "$out" "g2.txt"
+out="$(printf 'cd %s\nexec ls *.txt\nexit\n' "$tmpglob" | ./lunacmd 2>&1)"
+assert_contains "exec expands glob arguments" "$out" "g1.txt"
+assert_contains "exec expands glob arguments second match" "$out" "g2.txt"
+
 tmpdir_ls="$(mktemp -d)"
 trap 'rm -rf "$tmpdir_ls"' EXIT INT TERM
 mkdir -p "$tmpdir_ls/sub"
@@ -118,6 +154,26 @@ out="$(printf 'echo\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "echo with no args prints blank line before exit" "$out" "echo
 
 exit"
+
+tmphist="$(mktemp -d)"
+trap 'rm -rf "$tmphist"' EXIT INT TERM
+out="$(cat <<'EOF' | HOME="$tmphist" LUNACMD_NO_RC= ./lunacmd 2>&1
+exec printf A :>> ~/hist.txt
+exec printf B :>> ~/hist.txt
+!1
+!!
+cat ~/hist.txt
+exit
+EOF
+)"
+assert_contains "history !1 recalls command by absolute index" "$out" "ABAA"
+
+tmphist2="$(mktemp -d)"
+trap 'rm -rf "$tmphist" "$tmphist2"' EXIT INT TERM
+out="$(printf 'echo persist_history_entry\nexit\n' | HOME="$tmphist2" LUNACMD_NO_RC= ./lunacmd 2>&1)"
+assert_contains "history seed command executes" "$out" "persist_history_entry"
+out="$(printf 'history\nexit\n' | HOME="$tmphist2" LUNACMD_NO_RC= ./lunacmd 2>&1)"
+assert_contains "history persists between sessions" "$out" "echo persist_history_entry"
 
 out="$(cat <<'EOF' | ./lunacmd 2>&1
 a = 1 + \
@@ -414,7 +470,7 @@ out="$(printf 'echo ABC :| hexdump -x\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "hexdump reads stdin in pipeline" "$out" "41 42 43 0a"
 
 for cmd in \
-    alias cat cd cksum clear cp date echo exec fold head hexdump inca ls lunabuffer mkdir more mv prompt pwd rm rmdir setprompt sleep source type wc which
+    alias cat cd cksum clear cp date echo exec fold head hexdump history inca ls lunabuffer mkdir more mv prompt pwd rm rmdir setprompt sleep source tui type wc which
 do
     assert_builtin_help "$cmd"
 done

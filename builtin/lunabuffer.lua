@@ -6,7 +6,21 @@ local function usage()
 end
 
 local function resolve_path(path)
+    path = tostring(path or "")
+    if type(_RESOLVE_PATH) == "function" then
+        local resolved = _RESOLVE_PATH(path)
+        if resolved then
+            return resolved
+        end
+    end
     local base = G_CWD or "."
+    local home = os.getenv("HOME")
+    if path == "~" and home and home ~= "" then
+        return home
+    end
+    if path:sub(1, 2) == "~/" and home and home ~= "" then
+        return home .. path:sub(2)
+    end
     if path:sub(1, 1) == "/" then
         return path
     end

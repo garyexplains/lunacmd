@@ -58,6 +58,22 @@ Legacy symbols are available only when the line starts with `:!`:
 
 Without `:!`, legacy operators produce a parser error with guidance.
 
+## History Recall
+
+History is persisted between sessions and available via:
+
+- `history`
+- `history N`
+- `history -c`
+- `history -w`
+- `history -r`
+
+Event recall shortcuts:
+
+- `!!` last command
+- `!N` command number `N`
+- `!-N` command `N` entries back
+
 ## User Builtins
 
 `lunacmd` also searches for user-defined builtins in:
