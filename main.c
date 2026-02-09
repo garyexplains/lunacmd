@@ -44,6 +44,7 @@ typedef enum TokenType {
     TOKEN_EOF = 0,
     TOKEN_WORD,
     TOKEN_PIPE,
+    TOKEN_LUA_PIPE,
     TOKEN_REDIR_IN,
     TOKEN_REDIR_OUT,
     TOKEN_REDIR_OUT_APPEND,
@@ -51,6 +52,11 @@ typedef enum TokenType {
     TOKEN_REDIR_ERR_OUT_APPEND,
     TOKEN_REDIR_ERR_TO_OUT,
 } TokenType;
+
+typedef enum PipeType {
+    PIPE_TEXT = 0,
+    PIPE_LUA,
+} PipeType;
 
 typedef enum ParseSyntaxMode {
     SYNTAX_LUNA = 0,
@@ -86,6 +92,8 @@ typedef struct CommandNode {
 typedef struct PipelineNode {
     int command_count;
     CommandNode *commands;
+    int pipe_count;
+    PipeType *pipes;
 } PipelineNode;
 
 typedef struct CommandAst {
@@ -475,6 +483,109 @@ static int lua_alias_fn(lua_State *L) {
     lua_setglobal(L, "ALIASES");
 
     lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int lua_table_is_dense_array(lua_State *L, int idx, lua_Integer *len_out) {
+    lua_Integer max = 0;
+    lua_Integer count = 0;
+    int abs = lua_absindex(L, idx);
+
+    if (!lua_istable(L, abs)) {
+        return 0;
+    }
+
+    lua_pushnil(L);
+    while (lua_next(L, abs) != 0) {
+        lua_Integer k;
+        if (!lua_isinteger(L, -2)) {
+            lua_pop(L, 2);
+            return 0;
+        }
+        k = lua_tointeger(L, -2);
+        if (k < 1) {
+            lua_pop(L, 2);
+            return 0;
+        }
+        count++;
+        if (k > max) {
+            max = k;
+        }
+        lua_pop(L, 1);
+    }
+
+    if (max != count) {
+        return 0;
+    }
+    if (len_out) {
+        *len_out = max;
+    }
+    return 1;
+}
+
+static int lua_pour_fn(lua_State *L) {
+    int arg_idx;
+    int env_idx;
+    int items_idx;
+    int item_count = 0;
+
+    if (lua_gettop(L) < 1) {
+        return luaL_error(L, "pour(value) requires a value");
+    }
+
+    lua_settop(L, 1);
+    arg_idx = lua_absindex(L, 1);
+
+    lua_newtable(L);
+    env_idx = lua_absindex(L, -1);
+
+    lua_pushstring(L, "object");
+    lua_setfield(L, env_idx, "__pipe_schema");
+    lua_pushstring(L, "items");
+    lua_setfield(L, env_idx, "__pipe_default_path");
+    lua_pushstring(L, "pour");
+    lua_setfield(L, env_idx, "__pipe_origin");
+
+    lua_pushvalue(L, arg_idx);
+    lua_setfield(L, env_idx, "value");
+
+    lua_newtable(L);
+    items_idx = lua_absindex(L, -1);
+
+    if (lua_istable(L, arg_idx)) {
+        lua_Integer arr_len = 0;
+        if (lua_table_is_dense_array(L, arg_idx, &arr_len)) {
+            lua_Integer i;
+            for (i = 1; i <= arr_len; i++) {
+                lua_geti(L, arg_idx, i);
+                lua_seti(L, items_idx, i);
+            }
+        } else {
+            lua_pushnil(L);
+            while (lua_next(L, arg_idx) != 0) {
+                lua_newtable(L);
+
+                lua_pushvalue(L, -3);
+                lua_setfield(L, -2, "key");
+
+                lua_pushvalue(L, -2);
+                lua_setfield(L, -2, "value");
+
+                item_count++;
+                lua_seti(L, items_idx, item_count);
+                lua_pop(L, 1);
+            }
+        }
+    } else {
+        lua_pushvalue(L, arg_idx);
+        lua_seti(L, items_idx, 1);
+    }
+
+    lua_setfield(L, env_idx, "items");
+
+    lua_pushvalue(L, env_idx);
+    lua_setglobal(L, "LUA_PIPE_OUT");
+    lua_pushvalue(L, env_idx);
     return 1;
 }
 
@@ -1485,6 +1596,9 @@ static void free_command_ast(CommandAst *ast) {
     free(ast->pipeline.commands);
     ast->pipeline.commands = NULL;
     ast->pipeline.command_count = 0;
+    free(ast->pipeline.pipes);
+    ast->pipeline.pipes = NULL;
+    ast->pipeline.pipe_count = 0;
 }
 
 static int append_char(char **buffer, size_t *len, size_t *capacity, char c) {
@@ -1553,6 +1667,18 @@ static int append_pipeline_command(PipelineNode *pipeline, CommandNode *cmd) {
     return 1;
 }
 
+static int append_pipeline_pipe(PipelineNode *pipeline, PipeType type) {
+    PipeType *next;
+    next = realloc(pipeline->pipes, sizeof(PipeType) * (size_t)(pipeline->pipe_count + 1));
+    if (!next) {
+        return 0;
+    }
+    pipeline->pipes = next;
+    pipeline->pipes[pipeline->pipe_count] = type;
+    pipeline->pipe_count++;
+    return 1;
+}
+
 static int match_operator(
     const char *p, ParseSyntaxMode mode, TokenType *type, size_t *op_len) {
     if (mode == SYNTAX_LEGACY) {
@@ -1609,6 +1735,11 @@ static int match_operator(
         }
         if (starts_with(p, ":>>")) {
             *type = TOKEN_REDIR_OUT_APPEND;
+            *op_len = 3;
+            return 1;
+        }
+        if (starts_with(p, ":||")) {
+            *type = TOKEN_LUA_PIPE;
             *op_len = 3;
             return 1;
         }
@@ -1768,12 +1899,12 @@ static int parse_to_ast(
     while (1) {
         int saw_command_word = 0;
 
-        while (tok.type != TOKEN_EOF && tok.type != TOKEN_PIPE) {
+        while (tok.type != TOKEN_EOF && tok.type != TOKEN_PIPE && tok.type != TOKEN_LUA_PIPE) {
             if (tok.type == TOKEN_WORD) {
                 if (mode == SYNTAX_LUNA && is_legacy_operator_word(tok.text)) {
                     snprintf(err,
                              err_size,
-                             "legacy operator '%s' requires ':!' prefix (or use lunacmd operators like :>, :<, :|)",
+                             "legacy operator '%s' requires ':!' prefix (or use lunacmd operators like :>, :<, :|, :||)",
                              tok.text);
                     free_token(&tok);
                     free_command_node(&current);
@@ -1887,6 +2018,14 @@ static int parse_to_ast(
 
         if (tok.type == TOKEN_EOF) {
             break;
+        }
+
+        if (!append_pipeline_pipe(
+                &ast->pipeline, tok.type == TOKEN_LUA_PIPE ? PIPE_LUA : PIPE_TEXT)) {
+            snprintf(err, err_size, "out of memory");
+            free_token(&tok);
+            free_command_ast(ast);
+            return 0;
         }
 
         free_token(&tok);
@@ -2043,7 +2182,14 @@ static void print_preview_plan(
     }
 
     if (ast->pipeline.command_count > 1) {
-        printf("[preview] pipeline: %d stages\n", ast->pipeline.command_count);
+        int has_lua = 0;
+        for (i = 0; i < ast->pipeline.pipe_count; i++) {
+            if (ast->pipeline.pipes[i] == PIPE_LUA) {
+                has_lua = 1;
+                break;
+            }
+        }
+        printf("[preview] pipeline: %d stages (%s)\n", ast->pipeline.command_count, has_lua ? "lua-table" : "text");
     }
     if (background) {
         printf("[preview] background: yes\n");
@@ -2756,6 +2902,93 @@ static int expand_backticks_in_text(lua_State *L, const char *input, char **out,
     return 1;
 }
 
+static int expand_backticks_for_lua_chunk(const char *input, char **out, char *err, size_t err_size) {
+    size_t i = 0;
+    size_t n;
+    int in_single = 0;
+    int in_double = 0;
+    char *buf = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+
+    if (!input) {
+        *out = NULL;
+        return 1;
+    }
+
+    n = strlen(input);
+    while (i < n) {
+        char c = input[i];
+        if (!in_single && c == '"') {
+            in_double = !in_double;
+            if (!append_char(&buf, &len, &cap, c)) {
+                snprintf(err, err_size, "out of memory");
+                free(buf);
+                return 0;
+            }
+            i++;
+            continue;
+        }
+        if (!in_double && c == '\'') {
+            in_single = !in_single;
+            if (!append_char(&buf, &len, &cap, c)) {
+                snprintf(err, err_size, "out of memory");
+                free(buf);
+                return 0;
+            }
+            i++;
+            continue;
+        }
+        if (in_double && c == '\\' && i + 1 < n) {
+            if (!append_char(&buf, &len, &cap, c) || !append_char(&buf, &len, &cap, input[i + 1])) {
+                snprintf(err, err_size, "out of memory");
+                free(buf);
+                return 0;
+            }
+            i += 2;
+            continue;
+        }
+        if (!in_single && !in_double && c == '`') {
+            size_t j = i + 1;
+            size_t expr_start;
+            size_t expr_len;
+            while (j < n && input[j] != '`') {
+                j++;
+            }
+            if (j >= n) {
+                snprintf(err, err_size, "unterminated command substitution");
+                free(buf);
+                return 0;
+            }
+            expr_start = i + 1;
+            expr_len = j - expr_start;
+            if (!append_char(&buf, &len, &cap, '(')
+                || !append_bytes(&buf, &len, &cap, input + expr_start, expr_len)
+                || !append_char(&buf, &len, &cap, ')')) {
+                snprintf(err, err_size, "out of memory");
+                free(buf);
+                return 0;
+            }
+            i = j + 1;
+            continue;
+        }
+        if (!append_char(&buf, &len, &cap, c)) {
+            snprintf(err, err_size, "out of memory");
+            free(buf);
+            return 0;
+        }
+        i++;
+    }
+
+    if (!append_char(&buf, &len, &cap, '\0')) {
+        snprintf(err, err_size, "out of memory");
+        free(buf);
+        return 0;
+    }
+    *out = buf;
+    return 1;
+}
+
 static int expand_backticks_in_argv(lua_State *L, char **argv, int argc, char *err, size_t err_size) {
     int i;
     for (i = 1; i < argc; i++) {
@@ -3160,15 +3393,26 @@ static int execute_single_command(
     } else {
         if (!has_builtin) {
             const char *chunk = original_line;
+            char *expanded_chunk = NULL;
+            char chunk_subst_err[MAX_PARSE_ERR];
             if (force_reconstructed_chunk || cmd->redir_count > 0) {
                 build_lua_fallback_chunk(&effective, fallback_chunk, sizeof(fallback_chunk));
                 chunk = fallback_chunk;
             }
+            if (!expand_backticks_for_lua_chunk(chunk, &expanded_chunk, chunk_subst_err, sizeof(chunk_subst_err))) {
+                fprintf(stderr, "Substitution error: %s\n", chunk_subst_err);
+                restore_redirections(&snap);
+                free_redirs_copy(expanded_redirs, expanded_redir_count);
+                free_argv_list(expanded_argv, expanded_argc);
+                return 0;
+            }
+            chunk = expanded_chunk ? expanded_chunk : chunk;
 
             if (luaL_dostring(L, chunk) != LUA_OK) {
                 fprintf(stderr, "Lua error: %s\n", lua_tostring(L, -1));
                 lua_pop(L, 1);
             }
+            free(expanded_chunk);
         } else {
             const char *load_err = lua_tostring(L, -1);
             fprintf(stderr,
@@ -3187,6 +3431,8 @@ static int execute_single_command(
 static int execute_pipeline(lua_State *L, const PipelineNode *pipeline) {
     int i;
     int n = pipeline->command_count;
+    int has_text_pipe = 0;
+    int has_lua_pipe = 0;
     int *pipefds = NULL;
     pid_t *pids = NULL;
     int success = 1;
@@ -3196,6 +3442,444 @@ static int execute_pipeline(lua_State *L, const PipelineNode *pipeline) {
     }
     if (n == 1) {
         return execute_single_command(L, &pipeline->commands[0], NULL, 1);
+    }
+    if (pipeline->pipe_count != (n - 1)) {
+        fprintf(stderr, "Pipeline error: invalid pipeline structure\n");
+        return 0;
+    }
+
+    for (i = 0; i < pipeline->pipe_count; i++) {
+        if (pipeline->pipes[i] == PIPE_LUA) {
+            has_lua_pipe = 1;
+        } else {
+            has_text_pipe = 1;
+        }
+    }
+    if (has_lua_pipe && has_text_pipe) {
+        int first_lua = -1;
+        int first_text = -1;
+        int invalid = 0;
+        int lua_cmds;
+        int i2;
+        int outfd = -1;
+        int saved_stdout = -1;
+        int ok = 1;
+        int ref = LUA_NOREF;
+        char fallback_chunk[1024];
+        char tmp_path[] = "/tmp/lunacmd-luapipe-XXXXXX";
+
+        for (i2 = 0; i2 < pipeline->pipe_count; i2++) {
+            if (first_lua < 0 && pipeline->pipes[i2] == PIPE_LUA) {
+                first_lua = i2;
+            }
+            if (pipeline->pipes[i2] == PIPE_TEXT) {
+                first_text = i2;
+                if (first_text == i2) {
+                    /* first text only */
+                }
+            }
+        }
+        if (first_text < 0 || first_lua < 0) {
+            fprintf(stderr, "Pipeline error: invalid mixed pipeline structure\n");
+            return 0;
+        }
+
+        if (first_text < first_lua) {
+            int boundary = first_lua;
+            int ok = 1;
+            int ref = LUA_NOREF;
+            int saved_stdin = -1;
+            int outfd = -1;
+            int saved_stdout = -1;
+            char fallback_chunk[1024];
+            char tmp_path[] = "/tmp/lunacmd-textpipe-XXXXXX";
+
+            for (i2 = first_lua + 1; i2 < pipeline->pipe_count; i2++) {
+                if (pipeline->pipes[i2] == PIPE_TEXT) {
+                    invalid = 1;
+                    break;
+                }
+            }
+            if (invalid) {
+                fprintf(stderr, "Pipeline error: mixed pipelines must use a single transition (:|... then :||..., or :||... then :|...)\n");
+                return 0;
+            }
+
+            if (boundary > 0) {
+                PipelineNode text_prefix;
+                text_prefix.command_count = boundary;
+                text_prefix.commands = pipeline->commands;
+                text_prefix.pipe_count = boundary - 1;
+                text_prefix.pipes = pipeline->pipes;
+
+                outfd = mkstemp(tmp_path);
+                if (outfd < 0) {
+                    fprintf(stderr, "Pipeline error: temp file creation failed: %s\n", strerror(errno));
+                    return 0;
+                }
+                unlink(tmp_path);
+
+                saved_stdout = dup(STDOUT_FILENO);
+                if (saved_stdout < 0 || dup2(outfd, STDOUT_FILENO) < 0) {
+                    if (saved_stdout >= 0) {
+                        close(saved_stdout);
+                    }
+                    close(outfd);
+                    fprintf(stderr, "Pipeline error: stdout capture setup failed: %s\n", strerror(errno));
+                    return 0;
+                }
+
+                ok = execute_pipeline(L, &text_prefix);
+                fflush(stdout);
+                dup2(saved_stdout, STDOUT_FILENO);
+                close(saved_stdout);
+                saved_stdout = -1;
+                if (!ok) {
+                    close(outfd);
+                    return 0;
+                }
+                lseek(outfd, 0, SEEK_SET);
+            }
+
+            lua_pushboolean(L, 1);
+            lua_setglobal(L, "LUA_PIPE_ACTIVE");
+            lua_pushnil(L);
+            lua_setglobal(L, "LUA_PIPE_IN");
+            lua_pushboolean(L, boundary == (n - 1) ? 1 : 0);
+            lua_setglobal(L, "LUA_PIPE_LAST");
+            lua_pushnil(L);
+            lua_setglobal(L, "LUA_PIPE_OUT");
+
+            if (outfd >= 0) {
+                saved_stdin = dup(STDIN_FILENO);
+                if (saved_stdin < 0 || dup2(outfd, STDIN_FILENO) < 0) {
+                    if (saved_stdin >= 0) {
+                        close(saved_stdin);
+                    }
+                    close(outfd);
+                    lua_pushnil(L);
+                    lua_setglobal(L, "LUA_PIPE_IN");
+                    lua_pushnil(L);
+                    lua_setglobal(L, "LUA_PIPE_OUT");
+                    lua_pushnil(L);
+                    lua_setglobal(L, "LUA_PIPE_LAST");
+                    lua_pushboolean(L, 0);
+                    lua_setglobal(L, "LUA_PIPE_ACTIVE");
+                    fprintf(stderr, "Pipeline error: stdin capture setup failed: %s\n", strerror(errno));
+                    return 0;
+                }
+                close(outfd);
+                outfd = -1;
+            }
+
+            build_lua_fallback_chunk(&pipeline->commands[boundary], fallback_chunk, sizeof(fallback_chunk));
+            ok = execute_single_command(L, &pipeline->commands[boundary], fallback_chunk, 1);
+
+            if (saved_stdin >= 0) {
+                dup2(saved_stdin, STDIN_FILENO);
+                close(saved_stdin);
+            }
+            if (!ok) {
+                lua_pushnil(L);
+                lua_setglobal(L, "LUA_PIPE_IN");
+                lua_pushnil(L);
+                lua_setglobal(L, "LUA_PIPE_OUT");
+                lua_pushnil(L);
+                lua_setglobal(L, "LUA_PIPE_LAST");
+                lua_pushboolean(L, 0);
+                lua_setglobal(L, "LUA_PIPE_ACTIVE");
+                return 0;
+            }
+
+            lua_getglobal(L, "LUA_PIPE_OUT");
+            ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+            for (i2 = boundary + 1; i2 < n; i2++) {
+                if (ref != LUA_NOREF && ref != LUA_REFNIL) {
+                    lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+                    lua_setglobal(L, "LUA_PIPE_IN");
+                } else {
+                    lua_pushnil(L);
+                    lua_setglobal(L, "LUA_PIPE_IN");
+                }
+                lua_pushboolean(L, i2 == (n - 1) ? 1 : 0);
+                lua_setglobal(L, "LUA_PIPE_LAST");
+                lua_pushnil(L);
+                lua_setglobal(L, "LUA_PIPE_OUT");
+
+                build_lua_fallback_chunk(&pipeline->commands[i2], fallback_chunk, sizeof(fallback_chunk));
+                if (!execute_single_command(L, &pipeline->commands[i2], fallback_chunk, 1)) {
+                    ok = 0;
+                    break;
+                }
+
+                if (ref != LUA_NOREF && ref != LUA_REFNIL) {
+                    luaL_unref(L, LUA_REGISTRYINDEX, ref);
+                }
+                lua_getglobal(L, "LUA_PIPE_OUT");
+                ref = luaL_ref(L, LUA_REGISTRYINDEX);
+            }
+
+            if (ref != LUA_NOREF && ref != LUA_REFNIL) {
+                luaL_unref(L, LUA_REGISTRYINDEX, ref);
+            }
+            lua_pushnil(L);
+            lua_setglobal(L, "LUA_PIPE_IN");
+            lua_pushnil(L);
+            lua_setglobal(L, "LUA_PIPE_OUT");
+            lua_pushnil(L);
+            lua_setglobal(L, "LUA_PIPE_LAST");
+            lua_pushboolean(L, 0);
+            lua_setglobal(L, "LUA_PIPE_ACTIVE");
+            return ok;
+        }
+
+        for (i2 = first_text + 1; i2 < pipeline->pipe_count; i2++) {
+            if (pipeline->pipes[i2] == PIPE_LUA) {
+                invalid = 1;
+                break;
+            }
+        }
+        if (invalid) {
+            fprintf(stderr, "Pipeline error: mixed pipelines must use a single transition (:|... then :||..., or :||... then :|...)\n");
+            return 0;
+        }
+
+        lua_cmds = first_text + 1;
+        outfd = mkstemp(tmp_path);
+        if (outfd < 0) {
+            fprintf(stderr, "Pipeline error: temp file creation failed: %s\n", strerror(errno));
+            return 0;
+        }
+        unlink(tmp_path);
+
+        saved_stdout = dup(STDOUT_FILENO);
+        if (saved_stdout < 0 || dup2(outfd, STDOUT_FILENO) < 0) {
+            if (saved_stdout >= 0) {
+                close(saved_stdout);
+            }
+            close(outfd);
+            fprintf(stderr, "Pipeline error: stdout capture setup failed: %s\n", strerror(errno));
+            return 0;
+        }
+
+        lua_pushboolean(L, 1);
+        lua_setglobal(L, "LUA_PIPE_ACTIVE");
+        for (i2 = 0; i2 < lua_cmds; i2++) {
+            if (ref != LUA_NOREF && ref != LUA_REFNIL) {
+                lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+                lua_setglobal(L, "LUA_PIPE_IN");
+            } else {
+                lua_pushnil(L);
+                lua_setglobal(L, "LUA_PIPE_IN");
+            }
+            lua_pushboolean(L, i2 == (lua_cmds - 1) ? 1 : 0);
+            lua_setglobal(L, "LUA_PIPE_LAST");
+            lua_pushnil(L);
+            lua_setglobal(L, "LUA_PIPE_OUT");
+
+            build_lua_fallback_chunk(&pipeline->commands[i2], fallback_chunk, sizeof(fallback_chunk));
+            if (!execute_single_command(L, &pipeline->commands[i2], fallback_chunk, 1)) {
+                ok = 0;
+                break;
+            }
+
+            if (ref != LUA_NOREF && ref != LUA_REFNIL) {
+                luaL_unref(L, LUA_REGISTRYINDEX, ref);
+            }
+            lua_getglobal(L, "LUA_PIPE_OUT");
+            ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        }
+        if (ref != LUA_NOREF && ref != LUA_REFNIL) {
+            luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        }
+        lua_pushnil(L);
+        lua_setglobal(L, "LUA_PIPE_IN");
+        lua_pushnil(L);
+        lua_setglobal(L, "LUA_PIPE_OUT");
+        lua_pushnil(L);
+        lua_setglobal(L, "LUA_PIPE_LAST");
+        lua_pushboolean(L, 0);
+        lua_setglobal(L, "LUA_PIPE_ACTIVE");
+
+        fflush(stdout);
+        dup2(saved_stdout, STDOUT_FILENO);
+        close(saved_stdout);
+        saved_stdout = -1;
+        lseek(outfd, 0, SEEK_SET);
+
+        if (!ok) {
+            close(outfd);
+            return 0;
+        }
+
+        {
+            int start = lua_cmds;
+            int m = n - start;
+            int *tpipes = NULL;
+            pid_t *tpids = NULL;
+            int ti;
+            int tsuccess = 1;
+
+            if (m <= 0) {
+                close(outfd);
+                return 1;
+            }
+            if (m == 1) {
+                int saved_stdin = dup(STDIN_FILENO);
+                if (saved_stdin < 0 || dup2(outfd, STDIN_FILENO) < 0) {
+                    if (saved_stdin >= 0) {
+                        close(saved_stdin);
+                    }
+                    close(outfd);
+                    return 0;
+                }
+                close(outfd);
+                ok = execute_single_command(L, &pipeline->commands[start], NULL, 1);
+                dup2(saved_stdin, STDIN_FILENO);
+                close(saved_stdin);
+                return ok;
+            }
+
+            tpipes = calloc((size_t)(2 * (m - 1)), sizeof(int));
+            tpids = calloc((size_t)m, sizeof(pid_t));
+            if (!tpipes || !tpids) {
+                close(outfd);
+                free(tpipes);
+                free(tpids);
+                return 0;
+            }
+            for (ti = 0; ti < m - 1; ti++) {
+                if (pipe(&tpipes[2 * ti]) < 0) {
+                    tsuccess = 0;
+                    break;
+                }
+            }
+            if (!tsuccess) {
+                for (ti = 0; ti < 2 * (m - 1); ti++) {
+                    if (tpipes[ti] > 0) {
+                        close(tpipes[ti]);
+                    }
+                }
+                close(outfd);
+                free(tpipes);
+                free(tpids);
+                return 0;
+            }
+
+            for (ti = 0; ti < m; ti++) {
+                pid_t pid = fork();
+                if (pid < 0) {
+                    tsuccess = 0;
+                    break;
+                }
+                if (pid == 0) {
+                    int j;
+                    char fb[1024];
+                    const CommandNode *cmd = &pipeline->commands[start + ti];
+
+                    if (ti == 0) {
+                        dup2(outfd, STDIN_FILENO);
+                    } else {
+                        dup2(tpipes[2 * (ti - 1)], STDIN_FILENO);
+                    }
+                    if (ti < m - 1) {
+                        dup2(tpipes[2 * ti + 1], STDOUT_FILENO);
+                    }
+                    close(outfd);
+                    for (j = 0; j < 2 * (m - 1); j++) {
+                        close(tpipes[j]);
+                    }
+                    build_lua_fallback_chunk(cmd, fb, sizeof(fb));
+                    {
+                        int okc = execute_single_command(L, cmd, fb, 1);
+                        lua_close(L);
+                        exit(okc ? 0 : 1);
+                    }
+                }
+                tpids[ti] = pid;
+            }
+
+            close(outfd);
+            for (ti = 0; ti < 2 * (m - 1); ti++) {
+                close(tpipes[ti]);
+            }
+            if (!tsuccess) {
+                for (ti = 0; ti < m; ti++) {
+                    if (tpids[ti] > 0) {
+                        waitpid(tpids[ti], NULL, 0);
+                    }
+                }
+                free(tpipes);
+                free(tpids);
+                return 0;
+            }
+            for (ti = 0; ti < m; ti++) {
+                int st;
+                if (tpids[ti] > 0 && waitpid(tpids[ti], &st, 0) < 0) {
+                    tsuccess = 0;
+                }
+            }
+            free(tpipes);
+            free(tpids);
+            return tsuccess;
+        }
+    }
+    if (has_lua_pipe) {
+        int ref = LUA_NOREF;
+        lua_pushboolean(L, 1);
+        lua_setglobal(L, "LUA_PIPE_ACTIVE");
+        for (i = 0; i < n; i++) {
+            char fallback_chunk[1024];
+            int ok;
+
+            if (ref != LUA_NOREF && ref != LUA_REFNIL) {
+                lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+                lua_setglobal(L, "LUA_PIPE_IN");
+            } else {
+                lua_pushnil(L);
+                lua_setglobal(L, "LUA_PIPE_IN");
+            }
+            lua_pushboolean(L, i == (n - 1) ? 1 : 0);
+            lua_setglobal(L, "LUA_PIPE_LAST");
+            lua_pushnil(L);
+            lua_setglobal(L, "LUA_PIPE_OUT");
+
+            build_lua_fallback_chunk(&pipeline->commands[i], fallback_chunk, sizeof(fallback_chunk));
+            ok = execute_single_command(L, &pipeline->commands[i], fallback_chunk, 1);
+            if (!ok) {
+                if (ref != LUA_NOREF && ref != LUA_REFNIL) {
+                    luaL_unref(L, LUA_REGISTRYINDEX, ref);
+                }
+                lua_pushnil(L);
+                lua_setglobal(L, "LUA_PIPE_IN");
+                lua_pushnil(L);
+                lua_setglobal(L, "LUA_PIPE_OUT");
+                lua_pushnil(L);
+                lua_setglobal(L, "LUA_PIPE_LAST");
+                lua_pushboolean(L, 0);
+                lua_setglobal(L, "LUA_PIPE_ACTIVE");
+                return 0;
+            }
+
+            if (ref != LUA_NOREF && ref != LUA_REFNIL) {
+                luaL_unref(L, LUA_REGISTRYINDEX, ref);
+            }
+            lua_getglobal(L, "LUA_PIPE_OUT");
+            ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        }
+        if (ref != LUA_NOREF && ref != LUA_REFNIL) {
+            luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        }
+        lua_pushnil(L);
+        lua_setglobal(L, "LUA_PIPE_IN");
+        lua_pushnil(L);
+        lua_setglobal(L, "LUA_PIPE_OUT");
+        lua_pushnil(L);
+        lua_setglobal(L, "LUA_PIPE_LAST");
+        lua_pushboolean(L, 0);
+        lua_setglobal(L, "LUA_PIPE_ACTIVE");
+        return 1;
     }
 
     pipefds = calloc((size_t)(2 * (n - 1)), sizeof(int));
@@ -3475,8 +4159,18 @@ int main() {
     lua_setglobal(L, "_PREVIEW_SET");
     lua_pushboolean(L, 0);
     lua_setglobal(L, "PREVIEW_MODE");
+    lua_pushboolean(L, 0);
+    lua_setglobal(L, "LUA_PIPE_ACTIVE");
+    lua_pushnil(L);
+    lua_setglobal(L, "LUA_PIPE_IN");
+    lua_pushnil(L);
+    lua_setglobal(L, "LUA_PIPE_OUT");
+    lua_pushnil(L);
+    lua_setglobal(L, "LUA_PIPE_LAST");
     lua_pushcfunction(L, lua_alias_fn);
     lua_setglobal(L, "alias");
+    lua_pushcfunction(L, lua_pour_fn);
+    lua_setglobal(L, "pour");
     lua_newtable(L);
     lua_setglobal(L, "ALIASES");
     lua_newtable(L);

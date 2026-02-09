@@ -12,6 +12,7 @@
 Use these operators in default mode:
 
 - Pipe: `:|`
+- Lua-table pipe: `:||`
 - stdin redirection: `:<`
 - stdout overwrite: `:>`
 - stdout append: `:>>`
@@ -27,7 +28,35 @@ echo more :>> /tmp/out.txt
 exec cat :< /tmp/out.txt
 rm /tmp/missing 2:> /tmp/err.log
 rm /tmp/missing :> /tmp/both.log 2:>&1
+ls --lua /tmp :|| print(LUA_PIPE_IN.mode)
+ls --lua /tmp :|| tojson
+ls --lua /tmp :|| head -n 3
+ls --lua /tmp :|| tail -n 3
+ls --lua /tmp :|| wc -l
+ls --lua /tmp :|| wc --lua :|| tojson -h
+ls --lua /tmp :|| tojson -h :| more
+fromjson :< /tmp/data.json :|| print(LUA_PIPE_IN.k, LUA_PIPE_IN.a[2])
 ```
+
+You can push an arbitrary Lua value into a `:||` pipeline with `pour(value)`:
+
+```text
+t = { ["one key"] = 1, ["two"] = 2 }
+pour(t) :|| tojson -h
+pour(t) :|| head -n 1
+pour(t) :|| tojson -h --meta
+```
+
+`pour(value)` normalizes input into a pipe envelope with:
+- `value`: original value
+- `items`: array view for stream-like builtins
+- `__pipe_default_path = "items"` so `head`/`tail` work without `--path`
+
+`tojson` serializes `value` by default for `pour` envelopes. Use `--meta` to include envelope metadata.
+
+Mixed pipelines are supported with a single transition in either direction:
+- `:|| ... :|| :| ... :|`
+- `:| ... :| :|| ... :||`
 
 ### Special Buffer Targets
 

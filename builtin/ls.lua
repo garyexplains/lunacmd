@@ -7,7 +7,7 @@ local MODE_BLOCK = 0x6000
 local MODE_CHAR = 0x2000
 
 local function usage()
-    print("usage: ls [-1AaCcdFeFilLnpRrSstuvXxh] [-T N] [-w N] [--color[=WHEN]] [FILE]...")
+    print("usage: ls [-1AaCcdFeFilLnpRrSstuvXxh] [-T N] [-w N] [--color[=WHEN]] [--lua] [FILE]...")
     print("  -1      list one entry per line")
     print("  -A      list all except . and ..")
     print("  -a      list all including . and ..")
@@ -34,6 +34,7 @@ local function usage()
     print("  -x      list by lines")
     print("  -X      sort by extension")
     print("  -h      human-readable sizes")
+    print("  --lua   output Lua table literal instead of text")
 end
 
 local function resolve_path(path)
@@ -387,6 +388,7 @@ local opts = {
     list_by_lines = false,
     sort_ext = false,
     human = false,
+    lua = false,
 }
 
 local targets = {}
@@ -411,6 +413,8 @@ while i <= (ARGC or 0) do
             return
         end
         opts.color = v
+    elseif parse_options and arg == "--lua" then
+        opts.lua = true
     elseif parse_options and arg:sub(1, 1) == "-" and #arg > 1 then
         local j = 2
         while j <= #arg do
@@ -821,6 +825,91 @@ local function print_entries(entries)
     end
 end
 
+local function to_lua_value(v, indent)
+    indent = indent or ""
+    local t = type(v)
+    if t == "nil" then
+        return "nil"
+    elseif t == "boolean" or t == "number" then
+        return tostring(v)
+    elseif t == "string" then
+        return string.format("%q", v)
+    elseif t == "table" then
+        local is_array = true
+        local n = #v
+        local parts = {}
+        local next_indent = indent .. "  "
+        local seen = {}
+        local i
+
+        for k, _ in pairs(v) do
+            if type(k) ~= "number" or k < 1 or k > n or k % 1 ~= 0 then
+                is_array = false
+                break
+            end
+            seen[k] = true
+        end
+        if is_array then
+            for i = 1, n do
+                if not seen[i] then
+                    is_array = false
+                    break
+                end
+            end
+        end
+
+        if is_array then
+            for i = 1, n do
+                parts[#parts + 1] = next_indent .. to_lua_value(v[i], next_indent)
+            end
+            if #parts == 0 then
+                return "{}"
+            end
+            return "{\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "}"
+        end
+
+        local keys = {}
+        for k, _ in pairs(v) do
+            keys[#keys + 1] = tostring(k)
+        end
+        table.sort(keys)
+        for _, ks in ipairs(keys) do
+            local key = "[" .. string.format("%q", ks) .. "]"
+            parts[#parts + 1] = next_indent .. key .. " = " .. to_lua_value(v[ks], next_indent)
+        end
+        if #parts == 0 then
+            return "{}"
+        end
+        return "{\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "}"
+    end
+    return string.format("%q", tostring(v))
+end
+
+local function entry_to_lua(e)
+    local st = e.st or {}
+    local lst = e.lst or st
+    return {
+        name = e.name,
+        display = e.display,
+        path = e.path,
+        kind = st.kind,
+        size = st.size,
+        mode = st.mode,
+        mtime = st.mtime,
+        ctime = st.ctime,
+        atime = st.atime,
+        uid = st.uid,
+        gid = st.gid,
+        nlink = st.nlink,
+        inode = st.ino,
+        blocks_1k = blocks_1k(st),
+        executable = st.executable and true or false,
+        suffix = classify_suffix(e),
+        link_target = e.link_target,
+        followed = (opts.follow_links and lst.kind == "symlink") and true or false,
+    }
+end
+
 local function scan_dir(path)
     if type(_LISTDIR) ~= "function" then
         return nil, "internal listdir helper unavailable"
@@ -893,6 +982,101 @@ local function list_path(path, label, show_header)
     end
 
     recurse_dir(path, label)
+end
+
+local function collect_path_lua(path, label)
+    local st, err = stat_path(path, opts.follow_links)
+    if not st then
+        return { target = label, path = path, error = tostring(err) }
+    end
+
+    if opts.dir_itself or st.kind ~= "dir" then
+        local e, eerr = build_entry(label, path, label)
+        if not e then
+            return { target = label, path = path, error = tostring(eerr) }
+        end
+        return { target = label, path = path, kind = st.kind, entries = { entry_to_lua(e) } }
+    end
+
+    local result = { target = label, path = path, kind = "dir" }
+    if opts.recurse then
+        result.sections = {}
+    else
+        result.entries = {}
+    end
+
+    local function recurse_collect(dir_path, header_label)
+        local entries, lerr = scan_dir(dir_path)
+        local out = {}
+        if not entries then
+            return nil, lerr
+        end
+        table.sort(entries, cmp_entries)
+        for _, e in ipairs(entries) do
+            out[#out + 1] = entry_to_lua(e)
+        end
+        if opts.recurse then
+            result.sections[#result.sections + 1] = { path = header_label, entries = out }
+            for _, e in ipairs(entries) do
+                if e.name ~= "." and e.name ~= ".." and e.lst.kind == "dir" then
+                    local ok, suberr = recurse_collect(e.path, join_path(header_label, e.name))
+                    if not ok then
+                        io.stderr:write("ls: cannot open directory '" .. join_path(header_label, e.name) .. "': " .. tostring(suberr) .. "\n")
+                    end
+                end
+            end
+            return true
+        end
+        result.entries = out
+        return true
+    end
+
+    local ok, lerr = recurse_collect(path, label)
+    if not ok then
+        return { target = label, path = path, error = tostring(lerr) }
+    end
+    return result
+end
+
+if opts.lua then
+    local default_path = "targets[1].entries"
+    if opts.recurse then
+        default_path = "targets[1].sections[1].entries"
+    end
+    local out = {
+        mode = "lua",
+        __pipe_schema = "object",
+        __pipe_default_path = default_path,
+        options = {
+            all = opts.all,
+            almost_all = opts.almost_all,
+            long = opts.long,
+            recurse = opts.recurse,
+            dir_itself = opts.dir_itself,
+            sort = opts.sort_size and "size" or opts.sort_time and "time" or opts.sort_ext and "ext"
+                or opts.sort_version and "version" or "name",
+            reverse = opts.reverse,
+            follow_links = opts.follow_links,
+            human = opts.human,
+        },
+        targets = {},
+    }
+    for _, raw in ipairs(targets) do
+        local resolved = resolve_path(raw)
+        local label = raw
+        if raw == "." then
+            label = basename(resolved) ~= "" and raw or resolved
+        end
+        out.targets[#out.targets + 1] = collect_path_lua(resolved, label)
+    end
+    if LUA_PIPE_ACTIVE then
+        LUA_PIPE_OUT = out
+        if not LUA_PIPE_LAST then
+            return
+        end
+    end
+    print(to_lua_value(out))
+    return
 end
 
 local show_header = (#targets > 1) or opts.recurse

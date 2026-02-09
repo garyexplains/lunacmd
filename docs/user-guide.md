@@ -135,6 +135,36 @@ cat :< :@file :| exec grep lunacmd
 
 You can mix builtins and `exec` in a pipeline.
 
+Lua-table pipelines use `:||`:
+
+```text
+ls --lua /tmp :|| print(LUA_PIPE_IN.mode)
+ls --lua /tmp :|| head -n 5
+ls --lua /tmp :|| tail -n 5
+ls --lua /tmp :|| wc -l
+LUA_PIPE_OUT={items={1,2,3,4}} :|| head --path items -n 2
+LUA_PIPE_OUT={items={1,2,3,4}} :|| tail --path items -n 2
+t = { ["one key"] = 1, ["two"] = 2 }
+pour(t) :|| tojson -h
+pour(t) :|| head -n 1
+```
+
+In a `:||` pipeline, stages can exchange tables through `LUA_PIPE_IN` / `LUA_PIPE_OUT`.
+
+You can bridge into text pipelines after Lua-table stages:
+
+```text
+ls --lua /tmp :|| tojson -h :| more
+```
+
+You can also bridge text JSON into Lua-table pipelines:
+
+```text
+fromjson :< /tmp/data.json :|| print(LUA_PIPE_IN.k, LUA_PIPE_IN.a[2])
+```
+
+Mixed pipelines support a single transition in either direction (`:||` to `:|`, or `:|` to `:||`).
+
 ## Background Jobs
 
 Run a command in the background with trailing `&`:

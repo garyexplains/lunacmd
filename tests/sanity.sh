@@ -53,7 +53,7 @@ assert_not_line_matches() {
 assert_builtin_help() {
     cmd="$1"
 
-    if [ "$cmd" != "ls" ]; then
+    if [ "$cmd" != "ls" ] && [ "$cmd" != "tojson" ]; then
         out="$(printf '%s -h\nexit\n' "$cmd" | ./lunacmd 2>&1)"
         assert_contains "$cmd -h prints usage" "$out" "usage: $cmd"
     fi
@@ -87,6 +87,9 @@ assert_contains "redirection supports tilde HOME expansion" "$out" "via_tilde"
 
 out="$(printf 'exec ls ~\nexit\n' | HOME="$tmphome_tilde" ./lunacmd 2>&1)"
 assert_contains "exec supports tilde HOME expansion for args" "$out" "tmp"
+
+out="$(printf 'print(`1+2`)\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "lua fallback supports backtick expression embedding" "$out" "3"
 
 tmpglob="$(mktemp -d)"
 trap 'rm -rf "$tmphome_tilde" "$tmpglob"' EXIT INT TERM
@@ -156,6 +159,12 @@ assert_line_matches "ls -h enables human-readable sizes" "$out" "[0-9](\\.[0-9])
 
 out="$(printf 'ls --help\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "ls --help prints usage text" "$out" "usage: ls"
+assert_contains "ls --help includes --lua option" "$out" "--lua"
+
+out="$(printf 'ls --lua %s\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_contains "ls --lua emits lua mode marker" "$out" "[\"mode\"] = \"lua\""
+assert_contains "ls --lua includes target path entry" "$out" "[\"target\"] = \"$tmpdir_ls\""
+assert_contains "ls --lua includes file entry name" "$out" "[\"name\"] = \"visible.txt\""
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM
@@ -377,6 +386,10 @@ assert_contains "wc -m counts characters" "$out" "15 $tmpdir9/wc.txt"
 out="$(printf 'wc -L %s/wc.txt\nexit\n' "$tmpdir9" | ./lunacmd 2>&1)"
 assert_contains "wc -L reports longest line length" "$out" "7 $tmpdir9/wc.txt"
 
+out="$(printf 'wc --lua %s/wc.txt\nexit\n' "$tmpdir9" | ./lunacmd 2>&1)"
+assert_contains "wc --lua emits lua mode marker" "$out" "[\"mode\"] = \"lua\""
+assert_contains "wc --lua includes results array" "$out" "[\"results\"] = {"
+
 tmpdir10="$(mktemp -d)"
 trap 'rm -rf "$tmpdir" "$tmpdir2" "$tmpdir3" "$tmpdir4" "$tmpdir5" "$tmpdir6" "$tmpdir7" "$tmpdir8" "$tmpdir9" "$tmpdir10"' EXIT INT TERM
 printf 'line_from_stdin\n' > "$tmpdir10/in.txt"
@@ -409,6 +422,72 @@ assert_contains "wc reads stdin in pipeline" "$out" "3 -"
 out="$(printf 'echo abcdef :| fold -w 3\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "fold reads stdin in pipeline first chunk" "$out" "abc"
 assert_contains "fold reads stdin in pipeline second chunk" "$out" "def"
+
+out="$(printf 'ls --lua %s :|| print(LUA_PIPE_IN and LUA_PIPE_IN.mode)\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_contains "lua table pipeline passes structured output" "$out" "lua"
+out="$(printf 'ls --lua %s :|| wc -l\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_line_matches "wc consumes ls --lua via :|| default path" "$out" "^[[:space:]]*3[[:space:]]+lua-pipe$"
+out="$(printf 'ls --lua %s :|| wc --lua :|| print(LUA_PIPE_IN.results[1].l, LUA_PIPE_IN.results[1].label)\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_line_matches "wc --lua produces structured :|| output" "$out" "^3[[:space:]]+lua-pipe$"
+out="$(cat <<'EOF' | ./lunacmd 2>&1
+t = { ["one key"] = 1, ["two"] = 2 }
+pour(t) :|| tojson -h
+exit
+EOF
+)"
+assert_contains "pour helper pushes lua table into :|| pipeline" "$out" "\"one key\": 1"
+assert_contains "pour helper keeps second key value" "$out" "\"two\": 2"
+assert_not_contains "tojson defaults to payload for pour envelopes" "$out" "__pipe_default_path"
+out="$(cat <<'EOF' | ./lunacmd 2>&1
+t = { ["one key"] = 1, ["two"] = 2 }
+pour(t) :|| tojson -h --meta
+exit
+EOF
+)"
+assert_contains "tojson --meta includes pour envelope metadata" "$out" "\"__pipe_default_path\": \"items\""
+out="$(cat <<'EOF' | ./lunacmd 2>&1
+t = { ["one key"] = 1, ["two"] = 2 }
+pour(t) :|| head -n 1 :|| print(#LUA_PIPE_IN.items)
+exit
+EOF
+)"
+assert_line_matches "pour normalizes object table for head default path" "$out" "^1$"
+out="$(cat <<'EOF' | ./lunacmd 2>&1
+t = {10,20,30}
+pour(t) :|| tail -n 2 :|| print(#LUA_PIPE_IN.items, LUA_PIPE_IN.items[1], LUA_PIPE_IN.items[2])
+exit
+EOF
+)"
+assert_line_matches "pour normalizes array table for tail default path" "$out" "^2[[:space:]]+20[[:space:]]+30$"
+out="$(printf 'ls --lua %s :|| for _,e in ipairs(LUA_PIPE_IN.targets[1].entries) do if e.name==\"visible.txt\" then print(\"found_visible\") end end\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_contains "lua table pipeline exposes entry tables" "$out" "found_visible"
+out="$(printf 'ls --lua %s :|| head -n 1 :|| print(#LUA_PIPE_IN.targets[1].entries)\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_line_matches "head trims ls --lua entries in :|| pipeline" "$out" "^1$"
+out="$(printf 'ls --lua %s :|| tail -n 1 :|| print(#LUA_PIPE_IN.targets[1].entries)\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_line_matches "tail trims ls --lua entries in :|| pipeline" "$out" "^1$"
+out="$(printf 'LUA_PIPE_OUT={items={1,2,3,4}} :|| head --path items -n 2 :|| print(#LUA_PIPE_IN.items, LUA_PIPE_IN.items[1], LUA_PIPE_IN.items[2])\nexit\n' | ./lunacmd 2>&1)"
+assert_line_matches "head --path trims nested lua array" "$out" "^2[[:space:]]+1[[:space:]]+2$"
+out="$(printf 'LUA_PIPE_OUT={items={1,2,3,4}} :|| tail --path items -n 2 :|| print(#LUA_PIPE_IN.items, LUA_PIPE_IN.items[1], LUA_PIPE_IN.items[2])\nexit\n' | ./lunacmd 2>&1)"
+assert_line_matches "tail --path trims nested lua array" "$out" "^2[[:space:]]+3[[:space:]]+4$"
+out="$(printf 'LUA_PIPE_OUT={items={1,2,3,4}} :|| head -n 2\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "head requires --path for object without default path" "$out" "head: lua table pipeline input must be an array table or use --path PATH"
+out="$(printf 'LUA_PIPE_OUT={items={1,2,3,4}} :|| tail -n 2\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "tail requires --path for object without default path" "$out" "tail: lua table pipeline input must be an array table or use --path PATH"
+out="$(printf 'ls --lua %s :|| tojson\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_contains "tojson serializes lua pipe table to json" "$out" "\"mode\":\"lua\""
+assert_contains "tojson json includes visible.txt entry" "$out" "\"name\":\"visible.txt\""
+out="$(printf 'ls --lua %s :|| tojson -h\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_contains "tojson -h pretty prints with spacing" "$out" "\"mode\": \"lua\""
+out="$(printf 'ls --lua %s :|| tojson -h :| more\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
+assert_contains "mixed lua-table to text pipeline works" "$out" "\"mode\": \"lua\""
+printf '{"k":1,"a":[10,20]}\n' > "$tmpdir10/j.json"
+printf '[10,20,30]\n' > "$tmpdir10/jarr.json"
+out="$(printf 'fromjson :< %s/j.json :|| print(LUA_PIPE_IN.k, LUA_PIPE_IN.a[2])\nexit\n' "$tmpdir10" | ./lunacmd 2>&1)"
+assert_line_matches "fromjson parses stdin json and sets LUA_PIPE_OUT" "$out" "^1[[:space:]]+20$"
+out="$(printf 'fromjson :< %s/j.json :|| tojson\nexit\n' "$tmpdir10" | ./lunacmd 2>&1)"
+assert_contains "fromjson round-trips via tojson" "$out" "\"k\":1"
+out="$(printf 'cat %s/jarr.json :| fromjson :|| head -n 1 :|| print(#LUA_PIPE_IN, LUA_PIPE_IN[1])\nexit\n' "$tmpdir10" | ./lunacmd 2>&1)"
+assert_line_matches "mixed text then lua pipeline works via fromjson bridge" "$out" "^1[[:space:]]+10$"
 
 out="$(printf 'lunabuffer clear all\necho mem_line :> :@mem\ncat :< :@mem\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "mem buffer captures stdout redirection" "$out" "mem_line"
@@ -509,7 +588,7 @@ out="$(printf 'echo ABC :| hexdump -x\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "hexdump reads stdin in pipeline" "$out" "41 42 43 0a"
 
 for cmd in \
-    alias bg cat cd cksum clear cp date echo exec fg fold head hexdump history inca jobs ls lunabuffer mkdir more mv preview prompt pwd rm rmdir setprompt sleep source tail tui type wc which
+    alias bg cat cd cksum clear cp date echo exec fg fold fromjson head hexdump history inca jobs ls lunabuffer mkdir more mv preview prompt pwd rm rmdir setprompt sleep source tail tojson tui type wc which
 do
     assert_builtin_help "$cmd"
 done
@@ -564,6 +643,21 @@ assert_contains "head -v forces headers" "$out" "==> $tmpdir14/a.txt <=="
 
 out="$(printf 'echo stdin_line :| head -n 1\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "head reads stdin in pipeline" "$out" "stdin_line"
+
+out="$(printf 'LUA_PIPE_OUT={1,2,3,4} :|| head -n 2 :|| print(#LUA_PIPE_IN, LUA_PIPE_IN[1], LUA_PIPE_IN[2])\nexit\n' | ./lunacmd 2>&1)"
+assert_line_matches "head reads lua array input via :||" "$out" "^2[[:space:]]+1[[:space:]]+2$"
+
+out="$(printf 'LUA_PIPE_OUT={1,2,3,4} :|| head -c 1\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "head rejects -c for lua table pipeline input" "$out" "head: -c is not supported for lua table pipeline input"
+
+out="$(printf 'LUA_PIPE_OUT={1,2,3,4} :|| tail -n 2 :|| print(#LUA_PIPE_IN, LUA_PIPE_IN[1], LUA_PIPE_IN[2])\nexit\n' | ./lunacmd 2>&1)"
+assert_line_matches "tail reads lua array input via :||" "$out" "^2[[:space:]]+3[[:space:]]+4$"
+
+out="$(printf 'LUA_PIPE_OUT={1,2,3,4} :|| tail -n +3 :|| print(#LUA_PIPE_IN, LUA_PIPE_IN[1], LUA_PIPE_IN[2])\nexit\n' | ./lunacmd 2>&1)"
+assert_line_matches "tail supports +N for lua array input via :||" "$out" "^2[[:space:]]+3[[:space:]]+4$"
+
+out="$(printf 'LUA_PIPE_OUT={1,2,3,4} :|| tail -c 1\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "tail rejects -c for lua table pipeline input" "$out" "tail: -c is not supported for lua table pipeline input"
 
 tmpdir_tail="$(mktemp -d)"
 trap 'rm -rf "$tmpdir" "$tmpdir2" "$tmpdir3" "$tmpdir4" "$tmpdir5" "$tmpdir6" "$tmpdir7" "$tmpdir8" "$tmpdir9" "$tmpdir10" "$tmpdir11" "$tmpdir12" "$tmpdir13" "$tmpdir14" "$tmpdir15" "$tmpdir16" "$tmpdir_ls" "$tmphome_tilde" "$tmpglob" "$tmpsubst" "$tmpdir_rmdir" "$tmpdir_buf" "$tmpdir_tail"' EXIT INT TERM

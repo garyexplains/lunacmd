@@ -63,6 +63,9 @@ This lists builtins currently present in `builtin/`.
 
 - `ls [FILE]...`
   - Pure-Lua `ls` with shell-style options for long format, sorting, recursion, indicators, color, and human-readable sizes.
+  - `--lua` emits a Lua table literal with structured entry metadata.
+  - with `:||`, `--lua` also sets `LUA_PIPE_OUT` for Lua-table pipeline stages.
+  - includes pipeline metadata fields (`__pipe_schema`, `__pipe_default_path`) for generic Lua-table tools.
 - `cat FILE...`
   - Prints file contents.
 - `mkdir [-p|--parents] DIR...`
@@ -83,9 +86,12 @@ This lists builtins currently present in `builtin/`.
 - `fold [-s] [-w WIDTH] FILE...`
   - Wraps lines to width (`80` default).
   - `-s` prefers breaking at spaces.
-- `wc [-c] [-m] [-l] [-w] [-L] FILE...`
+- `wc [-c] [-m] [-l] [-w] [-L] [--lua] [--path PATH] FILE...`
   - Counts bytes/chars/newlines/words/longest-line.
   - Default output is `-l -w -c`.
+  - `--lua` emits structured Lua-table output (`results`, optional `total`).
+  - In `:||` mode, can consume top-level arrays directly or object input via `--path`.
+  - In `:||` mode, if producer provides `__pipe_default_path`, `wc` uses it when `--path` is omitted.
 - `hexdump [-x] [FILE]...`
   - Default: hex + ASCII display.
   - `-x`: raw hex-only output.
@@ -99,19 +105,39 @@ This lists builtins currently present in `builtin/`.
   - Prints first 10 lines by default.
   - `-n N[kbm]`: first N lines.
   - `-c N[kbm]`: first N bytes.
+  - `--path PATH`: in `:||` mode, select nested array table to truncate (example: `targets[1].entries`).
   - `-q`: never print file headers.
   - `-v`: always print file headers.
   - Supports files and stdin (`-` or no file args).
+  - In `:||` mode, can consume top-level array `LUA_PIPE_IN` directly, or object input via `--path`.
+  - In `:||` mode, if producer provides `__pipe_default_path`, `head` uses it automatically when `--path` is omitted.
+  - In `:||` mode, `-c` is not supported.
 - `tail [FILE]...`
   - Prints last 10 lines by default.
   - `-n N[kbm]`: last N lines.
   - `-c N[kbm]`: last N bytes.
   - `-n +N` / `-c +N`: start from the Nth item from the beginning.
+  - `--path PATH`: in `:||` mode, select nested array table to trim (example: `targets[1].entries`).
   - `-f`: follow file growth.
   - `-s SECONDS`: poll interval for `-f`.
   - `-q`: never print file headers.
   - `-v`: always print file headers.
   - Supports files and stdin (`-` or no file args).
+  - In `:||` mode, can consume top-level array `LUA_PIPE_IN` directly, or object input via `--path`.
+  - In `:||` mode, if producer provides `__pipe_default_path`, `tail` uses it automatically when `--path` is omitted.
+  - In `:||` mode, `-c` and `-f` are not supported.
+- `tojson`
+  - Expects a Lua table in `LUA_PIPE_IN` from a `:||` pipeline and prints JSON.
+  - `-h` pretty-prints JSON in human-readable form.
+  - `--meta` includes full envelope metadata for `pour(...)` input.
+  - For `pour(...)` envelopes, default output serializes the payload value (`.value`) instead of envelope internals.
+  - `--help` prints usage.
+  - Example: `ls --lua /tmp :|| tojson`
+- `fromjson [FILE]...`
+  - Parses JSON from FILE(s) or stdin into Lua values.
+  - In `:||` mode, sets `LUA_PIPE_OUT` to parsed value.
+  - For multiple FILEs, outputs an array of parsed values.
+  - Example: `fromjson :< /tmp/data.json :|| print(LUA_PIPE_IN.k)`
 
 ## External Command Bridge
 
