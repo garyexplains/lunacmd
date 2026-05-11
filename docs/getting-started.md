@@ -31,6 +31,21 @@ This builds:
 ./lunacmd
 ```
 
+## Install System-Wide
+
+Install the binary and core builtins under `/usr/local` by default:
+
+```sh
+sudo make install
+```
+
+Useful overrides:
+
+```sh
+make install PREFIX=/usr
+make install DESTDIR=/tmp/lunacmd-staging
+```
+
 Exit with:
 
 - `exit`

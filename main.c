@@ -35,6 +35,10 @@
 #define PATH_MAX 4096
 #endif
 
+#ifndef DEFAULT_BUILTIN_DIR
+#define DEFAULT_BUILTIN_DIR "/usr/local/share/lunacmd/builtin"
+#endif
+
 /* A static variable for holding the line. */
 static char *line_read = (char *)NULL;
 
@@ -409,12 +413,25 @@ static void reset_child_signals(void) {
 
 static int resolve_builtin_path_for_name(
     const char *cmd, char *out_path, size_t out_size, int *is_user_builtin) {
+    const char *builtin_dir;
     const char *home;
 
     if (snprintf(out_path, out_size, "builtin/%s.lua", cmd) >= (int)out_size) {
         return 0;
     }
     if (path_is_readable_file(out_path)) {
+        if (is_user_builtin) {
+            *is_user_builtin = 0;
+        }
+        return 1;
+    }
+
+    builtin_dir = getenv("LUNACMD_BUILTIN_DIR");
+    if (!builtin_dir || !*builtin_dir) {
+        builtin_dir = DEFAULT_BUILTIN_DIR;
+    }
+    if (snprintf(out_path, out_size, "%s/%s.lua", builtin_dir, cmd) < (int)out_size
+        && path_is_readable_file(out_path)) {
         if (is_user_builtin) {
             *is_user_builtin = 0;
         }

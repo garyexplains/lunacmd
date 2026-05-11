@@ -22,6 +22,12 @@ sudo apt install libreadline-dev -y
 make
 ```
 
+Optional system-wide install:
+
+```sh
+sudo make install
+```
+
 3. Run:
 
 ```sh
