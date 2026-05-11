@@ -270,6 +270,11 @@ end
 - `PROMPT` (string or function)
 - `PROMPT_CONT` (string or function)
 
+Default values on a fresh install:
+
+- `PROMPT = "luna> "`
+- `PROMPT_CONT = "... "`
+
 Examples:
 
 ```lua

@@ -13,10 +13,16 @@
 1. Install dependencies:
 
 ```sh
-sudo apt install libreadline-dev -y
+sudo apt install build-essential libreadline-dev git make -y
 ```
 
-2. Build:
+2. Build Lua:
+
+```sh
+make lua
+```
+
+3. Build `lunacmd`:
 
 ```sh
 make
@@ -28,13 +34,13 @@ Optional system-wide install:
 sudo make install
 ```
 
-3. Run:
+4. Run:
 
 ```sh
 ./lunacmd
 ```
 
-4. Run tests:
+5. Run tests:
 
 ```sh
 make test

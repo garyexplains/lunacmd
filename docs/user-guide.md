@@ -352,6 +352,11 @@ Prompt globals:
 - `PROMPT`: string/function for normal prompt
 - `PROMPT_CONT`: string/function for continuation prompt
 
+Default values:
+
+- `PROMPT = "luna> "`
+- `PROMPT_CONT = "... "`
+
 Examples:
 
 ```lua

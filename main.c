@@ -2303,7 +2303,7 @@ static char *read_repl_input(lua_State *L, int *warned_prompt, int *warned_promp
         size_t content_len;
         int continued;
         char *prompt = get_prompt_string(
-            L, first_line ? "PROMPT" : "PROMPT_CONT", first_line ? "" : "... ", first_line
+            L, first_line ? "PROMPT" : "PROMPT_CONT", first_line ? "luna> " : "... ", first_line
                                                                                        ? warned_prompt
                                                                                        : warned_prompt_cont);
         char *segment = rl_gets(prompt ? prompt : "", 0);
