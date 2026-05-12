@@ -3006,6 +3006,74 @@ static int expand_backticks_for_lua_chunk(const char *input, char **out, char *e
     return 1;
 }
 
+static int line_compiles_as_lua(lua_State *L, const char *input) {
+    int status;
+    if (!input) {
+        return 0;
+    }
+    status = luaL_loadstring(L, input);
+    if (status == LUA_OK) {
+        lua_pop(L, 1);
+        return 1;
+    }
+    lua_pop(L, 1);
+    return 0;
+}
+
+static int line_looks_like_lua_chunk(lua_State *L, const char *input) {
+    static const char *keywords[] = {
+        "if", "for", "while", "repeat", "function", "local", "do", "return", "break"
+    };
+    const char *p = input;
+    int i;
+
+    if (!input) {
+        return 0;
+    }
+    while (*p && isspace((unsigned char)*p)) {
+        p++;
+    }
+
+    if (line_compiles_as_lua(L, input)) {
+        return 1;
+    }
+
+    for (i = 0; i < (int)(sizeof(keywords) / sizeof(keywords[0])); i++) {
+        size_t n = strlen(keywords[i]);
+        if (strncmp(p, keywords[i], n) == 0 && (p[n] == '\0' || isspace((unsigned char)p[n]))) {
+            return 1;
+        }
+    }
+
+    for (; *p; p++) {
+        if (*p == '=' && p[1] != '=' && (p == input || p[-1] != '<') && p[-1] != '>' && p[-1] != '~') {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int execute_raw_lua_chunk(lua_State *L, const char *chunk_text) {
+    char *expanded_chunk = NULL;
+    char chunk_subst_err[MAX_PARSE_ERR];
+
+    if (!expand_backticks_for_lua_chunk(chunk_text, &expanded_chunk, chunk_subst_err, sizeof(chunk_subst_err))) {
+        fprintf(stderr, "Substitution error: %s\n", chunk_subst_err);
+        return 0;
+    }
+
+    if (luaL_dostring(L, expanded_chunk ? expanded_chunk : chunk_text) != LUA_OK) {
+        fprintf(stderr, "Lua error: %s\n", lua_tostring(L, -1));
+        lua_pop(L, 1);
+        free(expanded_chunk);
+        return 0;
+    }
+
+    free(expanded_chunk);
+    return 1;
+}
+
 static int expand_backticks_in_argv(lua_State *L, char **argv, int argc, char *err, size_t err_size) {
     int i;
     for (i = 1; i < argc; i++) {
@@ -3410,26 +3478,16 @@ static int execute_single_command(
     } else {
         if (!has_builtin) {
             const char *chunk = original_line;
-            char *expanded_chunk = NULL;
-            char chunk_subst_err[MAX_PARSE_ERR];
             if (force_reconstructed_chunk || cmd->redir_count > 0) {
                 build_lua_fallback_chunk(&effective, fallback_chunk, sizeof(fallback_chunk));
                 chunk = fallback_chunk;
             }
-            if (!expand_backticks_for_lua_chunk(chunk, &expanded_chunk, chunk_subst_err, sizeof(chunk_subst_err))) {
-                fprintf(stderr, "Substitution error: %s\n", chunk_subst_err);
+            if (!execute_raw_lua_chunk(L, chunk)) {
                 restore_redirections(&snap);
                 free_redirs_copy(expanded_redirs, expanded_redir_count);
                 free_argv_list(expanded_argv, expanded_argc);
                 return 0;
             }
-            chunk = expanded_chunk ? expanded_chunk : chunk;
-
-            if (luaL_dostring(L, chunk) != LUA_OK) {
-                fprintf(stderr, "Lua error: %s\n", lua_tostring(L, -1));
-                lua_pop(L, 1);
-            }
-            free(expanded_chunk);
         } else {
             const char *load_err = lua_tostring(L, -1);
             fprintf(stderr,
@@ -4317,6 +4375,41 @@ int main() {
         poll_jobs();
 
         if (!parse_to_ast(parse_line, parse_mode, &ast, parse_err, sizeof(parse_err))) {
+            if (parse_mode == SYNTAX_LUNA && starts_with(parse_err, "legacy operator")
+                && line_looks_like_lua_chunk(L, parse_line)) {
+                lua_pushstring(L, "lua-fallback");
+                lua_setglobal(L, "CMD_SOURCE");
+                lua_pushnil(L);
+                lua_setglobal(L, "CMD_PATH");
+                if (!background) {
+                    last_status = execute_raw_lua_chunk(L, parse_line) ? 0 : 1;
+                } else {
+                    pid_t pid = fork();
+                    if (pid < 0) {
+                        fprintf(stderr, "Job launch error: %s\n", strerror(errno));
+                        last_status = 1;
+                    } else if (pid == 0) {
+                        int ok;
+                        setpgid(0, 0);
+                        reset_child_signals();
+                        ok = execute_raw_lua_chunk(L, parse_line);
+                        lua_close(L);
+                        exit(ok ? 0 : 1);
+                    } else {
+                        int jid;
+                        setpgid(pid, pid);
+                        jid = add_job(pid, parse_line, JOB_RUNNING);
+                        if (jid > 0) {
+                            printf("[%d] %d\n", jid, (int)pid);
+                        }
+                        last_status = 0;
+                    }
+                }
+                free(run_line);
+                free(history_expanded);
+                free(line);
+                continue;
+            }
             fprintf(stderr, "Parse error: %s\n", parse_err);
             free(run_line);
             free(history_expanded);

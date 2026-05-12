@@ -517,6 +517,14 @@ assert_contains "legacy symbols work only with :! prefix" "$out" "legacy"
 out="$(printf 'a=1; b=2; if a < b then print(\"lua_cmp_ok\") end\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "lua comparison operators stay valid in default mode" "$out" "lua_cmp_ok"
 
+out="$(cat <<'EOF' | ./lunacmd 2>&1
+a = 1
+if a < 2 then print("lua_if_ok") end
+exit
+EOF
+)"
+assert_contains "lua if statement with comparison stays valid in default mode" "$out" "lua_if_ok"
+
 out="$(printf 'ls > %s/legacy_oops.txt\nexit\n' "$tmpdir10" | ./lunacmd 2>&1)"
 assert_contains "legacy redirect without :! gives helpful parse error" "$out" "legacy operator '>' requires ':!' prefix"
 
