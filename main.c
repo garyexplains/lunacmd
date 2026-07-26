@@ -35,6 +35,41 @@
 #define PATH_MAX 4096
 #endif
 
+#ifdef __APPLE__
+static HIST_ENTRY **history_list(void) {
+    static HIST_ENTRY **list = NULL;
+    static int allocated_count = 0;
+    int i;
+    if (list) {
+        for (i = 0; i < allocated_count; i++) {
+            if (list[i]) {
+                if (list[i]->line) {
+                    free((void *)list[i]->line);
+                }
+                free(list[i]);
+            }
+        }
+        free(list);
+    }
+    list = malloc((history_length + 1) * sizeof(HIST_ENTRY *));
+    allocated_count = history_length;
+    if (!list) return NULL;
+    for (i = 0; i < history_length; i++) {
+        HIST_ENTRY *e = history_get(history_base + i);
+        list[i] = malloc(sizeof(HIST_ENTRY));
+        if (list[i] && e) {
+            list[i]->line = e->line ? strdup(e->line) : NULL;
+            list[i]->data = e->data;
+        } else if (list[i]) {
+            list[i]->line = NULL;
+            list[i]->data = NULL;
+        }
+    }
+    list[history_length] = NULL;
+    return list;
+}
+#endif
+
 #ifndef DEFAULT_BUILTIN_DIR
 #define DEFAULT_BUILTIN_DIR "/usr/local/share/lunacmd/builtin"
 #endif
