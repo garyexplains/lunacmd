@@ -4080,6 +4080,15 @@ static int execute_pipeline(lua_State *L, const PipelineNode *pipeline) {
     return success;
 }
 
+static int lua_setenv(lua_State *L) {
+    const char *name = luaL_checkstring(L, 1);
+    const char *value = luaL_checkstring(L, 2);
+    if (setenv(name, value, 1) != 0) {
+        return luaL_error(L, "setenv failed");
+    }
+    return 0;
+}
+
 static int is_parent_builtin_name(const char *name) {
     const char *parent_builtins[] = {
         "cd",
@@ -4091,6 +4100,7 @@ static int is_parent_builtin_name(const char *name) {
         "lunabuffer",
         "tui",
         "jobs",
+        "export",
         "fg",
         "bg",
     };
@@ -4263,6 +4273,8 @@ int main() {
     lua_setglobal(L, "_JOB_FG");
     lua_pushcfunction(L, lua_job_bg);
     lua_setglobal(L, "_JOB_BG");
+    lua_pushcfunction(L, lua_setenv);
+    lua_setglobal(L, "_SETENV");
     lua_pushcfunction(L, lua_preview_get);
     lua_setglobal(L, "_PREVIEW_GET");
     lua_pushcfunction(L, lua_preview_set);
