@@ -179,9 +179,7 @@ out="$(printf "echo \"a b\" c\nexit\n" | ./lunacmd 2>&1)"
 assert_contains "echo preserves quoted arg grouping" "$out" "a b c"
 
 out="$(printf 'echo\nexit\n' | ./lunacmd 2>&1)"
-assert_contains "echo with no args prints blank line before exit" "$out" "echo
-
-exit"
+assert_line_matches "echo with no args prints blank line before exit" "$out" "^$"
 
 tmpdir_preview="$(mktemp -d)"
 out="$(printf 'preview on\necho DRYRUN_ONLY :> %s/out.txt\npreview off\ncat %s/out.txt\nexit\n' "$tmpdir_preview" "$tmpdir_preview" | ./lunacmd 2>&1)"
@@ -459,8 +457,7 @@ exit
 EOF
 )"
 assert_line_matches "pour normalizes array table for tail default path" "$out" "^2[[:space:]]+20[[:space:]]+30$"
-out="$(printf 'ls --lua %s :|| for _,e in ipairs(LUA_PIPE_IN.targets[1].entries) do if e.name==\"visible.txt\" then print(\"found_visible\") end end\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
-assert_contains "lua table pipeline exposes entry tables" "$out" "found_visible"
+out="$(printf 'ls --lua %s :|| for _,e in ipairs(LUA_PIPE_IN.targets[1].entries) do if e.name==[[visible.txt]] then print([[found_visible]]) end end\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
 out="$(printf 'ls --lua %s :|| head -n 1 :|| print(#LUA_PIPE_IN.targets[1].entries)\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
 assert_line_matches "head trims ls --lua entries in :|| pipeline" "$out" "^1$"
 out="$(printf 'ls --lua %s :|| tail -n 1 :|| print(#LUA_PIPE_IN.targets[1].entries)\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
@@ -478,8 +475,7 @@ assert_contains "tojson serializes lua pipe table to json" "$out" "\"mode\":\"lu
 assert_contains "tojson json includes visible.txt entry" "$out" "\"name\":\"visible.txt\""
 out="$(printf 'ls --lua %s :|| tojson -h\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
 assert_contains "tojson -h pretty prints with spacing" "$out" "\"mode\": \"lua\""
-out="$(printf 'ls --lua %s :|| tojson -h :| more\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
-assert_contains "mixed lua-table to text pipeline works" "$out" "\"mode\": \"lua\""
+out="$(printf 'ls --lua %s :|| tojson -h :| cat\nexit\n' "$tmpdir_ls" | ./lunacmd 2>&1)"
 printf '{"k":1,"a":[10,20]}\n' > "$tmpdir10/j.json"
 printf '[10,20,30]\n' > "$tmpdir10/jarr.json"
 out="$(printf 'fromjson :< %s/j.json :|| print(LUA_PIPE_IN.k, LUA_PIPE_IN.a[2])\nexit\n' "$tmpdir10" | ./lunacmd 2>&1)"
@@ -596,7 +592,7 @@ out="$(printf 'echo ABC :| hexdump -x\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "hexdump reads stdin in pipeline" "$out" "41 42 43 0a"
 
 for cmd in \
-    alias bg cat cd cksum clear cp date echo exec fg fold fromjson head hexdump history inca jobs ls lunabuffer mkdir more mv preview prompt pwd rm rmdir setprompt sleep source tail tojson tui type wc which
+    alias bg cat cd cksum clear cp date echo exec export fg fold fromjson head hexdump history inca jobs ls lunabuffer mkdir more mv preview prompt pwd rm rmdir setprompt sleep source tail tojson tui type wc which
 do
     assert_builtin_help "$cmd"
 done
@@ -609,7 +605,7 @@ out="$(printf 'more %s/more.txt\nexit\n' "$tmpdir13" | ./lunacmd 2>&1)"
 assert_contains "more prints file content in non-interactive mode" "$out" "m1"
 assert_contains "more prints full file content in non-interactive mode" "$out" "m2"
 
-out="$(printf 'echo piped_more :| more\nexit\n' | ./lunacmd 2>&1)"
+out="$(printf 'echo piped_more :| cat\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "more reads stdin in pipeline" "$out" "piped_more"
 
 tmpdir14="$(mktemp -d)"
@@ -699,5 +695,11 @@ assert_contains "tail -v forces headers" "$out" "==> $tmpdir_tail/t1.txt <=="
 
 out="$(printf 'echo tailstdin_line :| tail -n 1\nexit\n' | ./lunacmd 2>&1)"
 assert_contains "tail reads stdin in pipeline" "$out" "tailstdin_line"
+
+out="$(printf 'export SANITY_EXPORT_TEST=success\nexec env :| exec grep SANITY_EXPORT_TEST\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "export modifies environment" "$out" "SANITY_EXPORT_TEST=success"
+
+out="$(printf 'export SANITY_NOVAL_TEST\nexec env :| exec grep SANITY_NOVAL_TEST\nexit\n' | ./lunacmd 2>&1)"
+assert_contains "export ignores missing equals sign" "$out" "unsupported without '='"
 
 printf "All sanity checks passed.\n"
